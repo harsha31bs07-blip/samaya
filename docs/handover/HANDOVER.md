@@ -42,60 +42,55 @@ Recent MILP work, each item with tests and planted-bug checks (details in `docs/
   - Measured gain on our cases is small; see `cases/README.md`.
 - **Verification write-up:** `docs/results/comparison.md`, last section.
 - **Bound A/B tools:** `bench/ab_bound.sh` and `bench/ab_report.py`.
-
-## Work in progress: conflict analysis (`docs/handover/conflict-analysis.patch`)
-
-Apply it with `git apply docs/handover/conflict-analysis.patch`. It adds `src/mip/conflicts.cpp`
-and a test.
-
-**How it works:**
-- An infeasible node LP gives a proof from its Farkas ray: (A'y)'x must lie within
-  [min y's, max y's] over the row bounds.
-- A node LP cut off by the incumbent gives a proof from its duals: d'x <= cutoff - offset -
-  min y's, with d = c - A'y. The right-hand side follows the current cutoff.
-- Both are valid for any multipliers, since they use only the rows and their global bounds.
-- Proofs sparser than 15% of the columns + 10 are kept (at most 1000, the least recently
-  used replaced) and propagated at the start of every node.
-
-**Status:**
-- **Test** `mip_conflicts_never_exclude_an_optimal_solution`:
-  - 98 models, 556 proofs, 3746 nodes pruned by them, 0 violations, every optimum matches the
-    reference.
-  - A planted sign bug in the cutoff proof is caught (wrong optimum and a violated proof).
-  - **Open:** a planted bug that drops the row scaling of the Farkas multipliers
-    (`y[i] = ray[i]` instead of `ray[i] * scaling_.row[i]`) is **not** caught yet. The cause is
-    known: in the test's families `analyze_infeasible_lp` is never called, because bound
-    propagation prunes every infeasible node before its LP. All 556 proofs are cut-off proofs.
-    Add a family whose node LPs become infeasible only through several rows together, e.g.
-    equality rows that share continuous columns, keep the 1e-3..1e3 row factors, and require
-    some infeasible-LP proofs in the test (count them in MipOutcome). Then the scaling planted
-    bug must fail.
-- **Quick trial** (60 s, against the tree-cuts build):
-  - neos17: solved in 19.9 s. Before: unsolved; HiGHS and SCIP solve it.
-  - timtab1: bound 499,978 -> 524,215, and a solution found.
-  - neos-911970: bound 50.34 -> 50.89.
-  - mas76 and pk1: unchanged.
-- **Still to do:**
-  1. Resolve the open test point.
-  2. The three presets.
-  3. A full bound A/B:
-     `bench/ab_bound.sh OUT OLD NEW 60 && python3 bench/ab_report.py OUT`.
-  4. Commit with the numbers.
+- **Conflict analysis** (`src/mip/conflicts.cpp`; dual proofs, Witzig, Berthold and Heinz 2017):
+  - An infeasible node LP gives a proof from its Farkas ray: (A'y)'x must lie within
+    [min y's, max y's] over the row bounds. A node LP cut off by the incumbent gives one from
+    its duals: d'x <= cutoff - offset - min y's, with d = c - A'y.
+  - Both are valid for any multipliers, since they use only the rows and their global bounds.
+    Proofs sparser than 15% of the columns + 10 are kept (at most 1000, the least recently used
+    replaced) and propagated at the start of every node.
+  - Round-off entries of the ray (up to 1e-12 of the largest, in the scaled space) are zeroed
+    before mapping, or a one-sided row would make the proof's range infinite.
+  - Tests: `mip_conflicts_never_exclude_an_optimal_solution` (98 random models with their rows
+    scaled by 1e-3..1e3: 556 proofs, 3746 prunes, 0 violations) and
+    `mip_farkas_rays_prove_their_nodes_infeasible` (60 lot-sizing models: 265 infeasible node
+    LPs, every ray accepted by `verify_infeasibility` on its node's bounds and kept as a proof).
+  - The first test's families never reach the Farkas code (0 infeasible LPs): in
+    multi_knapsack propagation prunes those nodes, and in fixed_charge and random equality
+    models strong branching proves infeasible children before they get an LP. The lot-sizing
+    test therefore runs without strong branching.
+  - Planted bugs, all caught: the row scaling of the ray dropped (338 of 362 rays rejected by
+    the verifier; such a bug can only lose proofs, never make a wrong one), a Farkas proof put
+    on the wrong side (181 violations), a sign flip in the cut-off proof (violations and wrong
+    optima in both tests).
+  - Bound A/B, 60 s (both builds at the same time): solved 7 -> 9 (neos17, nu25-pr12); bound
+    better on 11 instances, worse on 9; mean distance from the optimum 22.44% -> 22.29%, median
+    8.34% -> 7.65%. Largest gains neos17 (solved), timtab1 36.5% -> 34.1%, neos-911970 8.4% ->
+    7.1%; largest losses enlight_hard 16.2% -> 18.9%, reblock115 1.7% -> 3.5%.
 
 ## Next tasks, in the order agreed
 
-1. **Finish conflict analysis** (above). Then consider proofs from infeasible strong-branching
-   children too.
+1. **Proofs from infeasible strong-branching children** (`select_branching`, the kInfeasible
+   case): the ray is fresh there and `lower_`/`upper_` hold the child's bounds until they are
+   restored. Needs its own test with strong branching on. Two known limits of the current
+   proofs: a round-off coefficient on a column with an infinite bound loses a Farkas proof, and
+   `add_conflict` gives up when either global bound is infinite although a one-sided proof
+   needs only one. Parallel search does not add the workers' conflict counters to the outcome.
 2. **Clique table and implied-bound cuts** for the weak big-M bounds (p200x1188c, mc11).
 3. **Symmetry** (fhnw-binpack4-4, graph20-20-1rand): orbital fixing on a simple detector.
    Only if time allows.
 4. **Structure cuts for the MRPL models**, e.g. (l,S) inequalities. The cases already solve in
    seconds, so this is low priority.
 5. **Final results:**
-   - Integrate the laptop runs (`results/compare-2`: netlib, cases, miplib60, miplib600,
-     miplib600-t6) into `docs/results/comparison.md`.
-   - Count SCIP's "gaplimit" status as optimal, including in older tables.
-   - Keep numbers from different machines apart.
+   - Netlib, the cases and MIPLIB at 60 s from the laptop are in `docs/results/comparison.md`.
+     Still to add: MIPLIB at 600 s.
+   - The first laptop 600 s run switched samaya builds mid-run (the release binary was rebuilt
+     at 12:26 UTC while it ran), so samaya is rerun alone on one build.
+   - The laptop's WSL2 clock ran about 7% fast, which gave samaya about 6% less time than the
+     other solvers (they stop on the real time). Check the clock before a laptop run (see
+     `docs/results/comparison.md`, laptop section) and restart WSL if it drifts.
+   - SCIP's "gaplimit" status counts as optimal (`bench/harness.py`). Keep numbers from different
+     machines apart.
 
 ## How to measure
 

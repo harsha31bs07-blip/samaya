@@ -978,6 +978,10 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
   if (node.branch_col >= 0 && !propagate({node.branch_col}, &node.local)) {
     return NodeResult::kPruned;
   }
+  if (!conflicts_.empty() && !propagate_conflicts(&node.local)) {
+    ++outcome_.conflict_prunes;
+    return NodeResult::kPruned;
+  }
   std::shared_ptr<const std::vector<VarStatus>> start = node.basis;
   bool cuts_tried = false;
   double before_cuts = kInf;  // The objective before this node's cut round, until re-solved.
@@ -990,7 +994,9 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
     if (status == SimplexStatus::kNumericalError) status = solve_relaxation(nullptr, -1);
     switch (status) {
       case SimplexStatus::kOptimal: break;
-      case SimplexStatus::kInfeasible: return NodeResult::kPruned;
+      case SimplexStatus::kInfeasible:
+        if (options_.conflicts) analyze_infeasible_lp();
+        return NodeResult::kPruned;
       case SimplexStatus::kUnbounded:
         return node.depth == 0 ? NodeResult::kUnbounded : NodeResult::kFailed;
       case SimplexStatus::kTimeLimit: return NodeResult::kStopped;
@@ -1032,6 +1038,7 @@ BranchAndBound::NodeResult BranchAndBound::process_node(Node& node, std::vector<
     const double bound = effective_bound(objective);
     if (bound >= cutoff()) {
       pruned_bound_ = std::min(pruned_bound_, bound);
+      if (options_.conflicts) analyze_cutoff_lp();
       return NodeResult::kPruned;
     }
     node.bound = std::max(node.bound, objective);
@@ -1402,6 +1409,13 @@ MipOutcome BranchAndBound::solve() {
     }
   }
 
+  if (outcome_.conflicts_found > 0) {
+    log_.log(1,
+             "MIP conflicts: %lld proofs stored (%lld from %lld infeasible LPs), %lld nodes "
+             "pruned by them",
+             outcome_.conflicts_found, outcome_.farkas_proofs, outcome_.conflict_infeasible_lps,
+             outcome_.conflict_prunes);
+  }
   if (tree_cut_rounds_ > 0) {
     log_.log(1, "MIP tree cuts: %d kept from %lld of %lld rounds, %zu left in the pool, %.2f s",
              outcome_.tree_cuts, tree_cut_kept_rounds_, tree_cut_rounds_, cut_pool_.size(),

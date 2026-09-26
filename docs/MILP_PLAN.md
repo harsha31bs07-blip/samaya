@@ -117,6 +117,16 @@ above, which ignores such instances.
   - Largest gains: neos17 21.0% -> 8.5%, enlight_hard 16.2% -> 10.8%, binkar10_1 0.32% ->
     0.03%. Largest loss: neos-911970 5.5% -> 8.4% (the kept cuts slow its node LPs).
 - **MIP start (`--mip-start`, `Params::mip_start`):** see `cases/README.md`, re-planning.
+- **Conflict analysis** (dual proofs; Witzig, Berthold and Heinz 2017), `src/mip/conflicts.cpp`:
+  - An infeasible node LP gives a proof from its Farkas ray, a node LP cut off by the incumbent one
+    from its duals. Both use only the rows and their global bounds, so they hold at every node;
+    sparse ones are kept (at most 1000) and propagated at every node.
+  - Every Farkas ray is checked in the tests with `verify_infeasibility` on its node's bounds: a
+    wrong mapping of the ray to the original rows only loses proofs (any multipliers give a valid
+    one), so nothing else would catch it.
+  - Bound A/B, 60 s: solved 7 -> 9 (neos17, nu25-pr12); bound better on 11, worse on 9; mean
+    distance from the optimum 22.44% -> 22.29%, median 8.34% -> 7.65%. Largest loss enlight_hard
+    16.2% -> 18.9%.
 
 **Next, from the per-instance analysis** ([results/comparison.md](results/comparison.md)):
 - neos-3381206-awhea now has a solution (Feasibility Jump) but its bound is stuck at 416 with no

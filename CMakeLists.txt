@@ -67,6 +67,7 @@ add_library(samaya
   src/mip/heuristics.cpp
   src/mip/probing.cpp
   src/mip/parallel.cpp
+  src/mip/conflicts.cpp
   src/mip/feasibility_jump.cpp
   src/presolve/presolve.cpp
   src/linalg/scaling.cpp

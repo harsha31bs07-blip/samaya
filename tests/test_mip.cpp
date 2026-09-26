@@ -347,6 +347,88 @@ Model big_m_network(std::mt19937& rng) {
   return model;
 }
 
+// Each row times a factor between 1e-3 and 1e3: the same model, but its LP is scaled, so anything
+// derived from the scaled LP (a proof, say) must map the scaled multipliers back to the rows.
+void scale_rows_randomly(Model& model, std::mt19937& rng) {
+  std::vector<double> factor(static_cast<std::size_t>(model.num_rows()));
+  for (double& f : factor) f = std::pow(10.0, std::uniform_real_distribution<double>(-3, 3)(rng));
+  std::vector<samaya::Triplet> t;
+  const auto start = model.A.col_start();
+  const auto index = model.A.row_index();
+  const auto value = model.A.values();
+  for (Index j = 0; j < model.num_cols(); ++j) {
+    for (samaya::NnzIndex p = start[j]; p < start[j + 1]; ++p) {
+      t.push_back({index[p], j, value[p] * factor[index[p]]});
+    }
+  }
+  for (Index i = 0; i < model.num_rows(); ++i) {
+    model.row_lower[i] *= factor[i];
+    model.row_upper[i] *= factor[i];
+  }
+  model.A = samaya::SparseMatrix::from_triplets(model.num_rows(), model.num_cols(), std::move(t));
+}
+
+// Capacitated lot sizing in batches over 5-8 periods: production x_p (continuous) comes in
+// batches of `size` units (x_p <= size z_p, z_p integer in [0, 3]), and the stock s_p carried out
+// of period p is capped below one batch:
+//   s_{p-1} + x_p - s_p = d_p  (no stock before the first period),   x_p - size z_p <= 0.
+// Propagation tightens only integer columns and checks one row at a time, and the balance rows
+// hold no integer column, so a node with too few batches for a demand is found infeasible only by
+// its LP, through a balance row and a linking row together. Every column is bounded and the data
+// are integers, so each such LP misses its demand by at least one unit. Demands of at most three
+// batches keep every model feasible (make d_p in period p), and with 4^8 integer points the
+// reference search has at most 2 * 4^8 nodes, below its limit of 200000.
+Model lot_sizing(std::mt19937& rng) {
+  const auto uniform_int = [&](int lo, int hi) {
+    return std::uniform_int_distribution<int>(lo, hi)(rng);
+  };
+  constexpr int kBatches = 3;
+  const int periods = uniform_int(5, 8);
+  const int size = uniform_int(4, 12);
+  // Below one batch: a missing batch can be made up from stock only in part.
+  const int stock = uniform_int(1, size - 1);
+  const auto x = [&](int p) { return static_cast<Index>(p); };
+  const auto s = [&](int p) { return static_cast<Index>(periods + p); };
+  const auto z = [&](int p) { return static_cast<Index>(2 * periods + p); };
+  Model model;
+  for (int p = 0; p < periods; ++p) {  // Production: a cost per unit.
+    model.obj.push_back(uniform_int(1, 5));
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(kBatches * size);
+    model.col_type.push_back(samaya::VarType::kContinuous);
+  }
+  for (int p = 0; p < periods; ++p) {  // Stock: a holding cost per unit.
+    model.obj.push_back(uniform_int(1, 3));
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(stock);
+    model.col_type.push_back(samaya::VarType::kContinuous);
+  }
+  for (int p = 0; p < periods; ++p) {  // Batches: a fixed cost each.
+    model.obj.push_back(uniform_int(10, 40));
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(kBatches);
+    model.col_type.push_back(samaya::VarType::kInteger);
+  }
+  std::vector<samaya::Triplet> t;
+  Index row = 0;
+  for (int p = 0; p < periods; ++p, ++row) {  // s_{p-1} + x_p - s_p = d_p.
+    if (p > 0) t.push_back({row, s(p - 1), 1.0});
+    t.push_back({row, x(p), 1.0});
+    t.push_back({row, s(p), -1.0});
+    const double demand = uniform_int(size, kBatches * size);
+    model.row_lower.push_back(demand);
+    model.row_upper.push_back(demand);
+  }
+  for (int p = 0; p < periods; ++p, ++row) {  // x_p - size z_p <= 0.
+    t.push_back({row, x(p), 1.0});
+    t.push_back({row, z(p), -static_cast<double>(size)});
+    model.row_lower.push_back(-kInf);
+    model.row_upper.push_back(0.0);
+  }
+  model.A = samaya::SparseMatrix::from_triplets(row, static_cast<Index>(3 * periods), std::move(t));
+  return model;
+}
+
 }  // namespace
 
 TEST(mip_heuristics_find_solutions_at_the_root) {
@@ -648,6 +730,120 @@ TEST(mip_start_becomes_the_incumbent_or_is_completed) {
   CHECK(models > 100);
   CHECK_EQ(taken, models);
   CHECK_EQ(completed, models);
+}
+
+TEST(mip_conflicts_never_exclude_an_optimal_solution) {
+  // Proofs from infeasible node LPs (Farkas rays) hold at every node, and proofs from cut-off node
+  // LPs (duals) hold for every improving solution. Checked against a known optimum on families
+  // with many infeasible and cut-off nodes, the optimum must match the reference and no proof
+  // may exclude the optimum while it would still improve on the incumbent.
+  const samaya::Logger quiet(0);
+  long long violations = 0;
+  long long found = 0;
+  long long prunes = 0;
+  long long infeasible_lps = 0;
+  long long farkas = 0;
+  long long farkas_failures = 0;
+  int models = 0;
+  std::mt19937 rng(171);
+  for (int k = 0; k < 120; ++k) {
+    Model model;
+    switch (k % 3) {
+      case 0: model = multi_knapsack(rng); break;
+      case 1: model = random_milp(MilpFamily::kEquality, rng); break;
+      default: model = fixed_charge(rng); break;
+    }
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    scale_rows_randomly(model, rng);
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    // Without root reductions, cuts and heuristics the trees are deep enough to prune by proofs.
+    options.probing = false;
+    options.restart = false;
+    options.cuts = false;
+    options.heuristics = false;
+    options.conflict_density = 1.0;  // Keep every proof: validity does not depend on density.
+    options.debug_solution = ref.x;
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    ++models;
+    violations += out.debug_conflict_violations;
+    found += out.conflicts_found;
+    prunes += out.conflict_prunes;
+    infeasible_lps += out.conflict_infeasible_lps;
+    farkas += out.farkas_proofs;
+    farkas_failures += out.debug_farkas_failures;
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+  }
+  std::printf("  %d models, %lld proofs stored (%lld from %lld infeasible LPs), %lld nodes pruned "
+              "by them, %lld violations, %lld rays rejected\n",
+              models, found, farkas, infeasible_lps, prunes, violations, farkas_failures);
+  CHECK_EQ(violations, 0);
+  CHECK_EQ(farkas_failures, 0);
+  CHECK(models > 80);
+  CHECK(found > 200);
+  CHECK(prunes > 20);
+}
+
+TEST(mip_farkas_rays_prove_their_nodes_infeasible) {
+  // Lot sizing with its rows scaled as above: an infeasible node there is found only by its LP, and
+  // its Farkas ray combines a balance row with a linking row (see lot_sizing). Any multipliers give
+  // a valid proof, so a wrong mapping of the ray to the original rows would only lose proofs; it
+  // is caught by checking every ray with verify_infeasibility on its node's bounds. Strong
+  // branching is off: it proves infeasible children before they get a node LP, and those are not
+  // analyzed (the test above keeps it on).
+  const samaya::Logger quiet(0);
+  constexpr int kModels = 60;
+  long long violations = 0;
+  long long found = 0;
+  long long prunes = 0;
+  long long infeasible_lps = 0;
+  long long farkas = 0;
+  long long farkas_failures = 0;
+  long long reference_nodes = 0;
+  int models = 0;
+  std::mt19937 rng(172);
+  for (int k = 0; k < kModels; ++k) {
+    Model model = lot_sizing(rng);
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    REQUIRE(ref.status == ReferenceMilpResult::Status::kOptimal);
+    reference_nodes += ref.nodes;
+    scale_rows_randomly(model, rng);
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    options.probing = false;
+    options.restart = false;
+    options.cuts = false;
+    options.heuristics = false;
+    options.max_strong_branching = 0;
+    options.conflict_density = 1.0;
+    options.debug_solution = ref.x;
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    ++models;
+    violations += out.debug_conflict_violations;
+    found += out.conflicts_found;
+    prunes += out.conflict_prunes;
+    infeasible_lps += out.conflict_infeasible_lps;
+    farkas += out.farkas_proofs;
+    farkas_failures += out.debug_farkas_failures;
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+  }
+  std::printf("  %d lot-sizing models (%lld reference nodes): %lld proofs stored (%lld from %lld "
+              "infeasible LPs), %lld nodes pruned by them, %lld violations, %lld rays rejected\n",
+              models, reference_nodes, found, farkas, infeasible_lps, prunes, violations,
+              farkas_failures);
+  CHECK_EQ(models, kModels);
+  CHECK_EQ(violations, 0);
+  CHECK_EQ(farkas_failures, 0);
+  // Floors against a vacuous run, about a third of the counts at this seed (265 infeasible LPs,
+  // all 265 rays kept as proofs, 63 prunes).
+  CHECK(infeasible_lps > 80);
+  CHECK(farkas > 80);
+  CHECK(prunes > 20);
 }
 
 TEST(mip_parallel_search_matches_reference) {

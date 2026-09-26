@@ -42,6 +42,11 @@ struct MipOptions {
   // one row layout. SCIP's default frequency for these separators is 10.
   bool tree_cuts = true;
   int tree_separation_frequency = 10;
+  // Conflict analysis: proofs from infeasible and cut-off node LPs are stored and propagated. A
+  // proof may involve at most conflict_density x columns (+ 10): a dense one rarely prunes and
+  // costs every node a pass over its columns (SCIP's conflict/maxvarsfac is 0.15).
+  bool conflicts = true;
+  double conflict_density = 0.15;
   // Kept tree cuts stay in every later node LP, so they may grow the LP by at most this share of
   // its rows: a node LP's cost grows about linearly with the rows, and on small models
   // (markshare_4_0: 6 rows) node throughput is what solves them.
@@ -69,7 +74,9 @@ struct MipOptions {
   // search prunes against it as if it were an incumbent. Used by the sub-MIPs.
   std::optional<double> objective_cutoff;
   // Tests: a known feasible (e.g. optimal) solution. Every cut is checked against it and a cut
-  // that separates it is counted in MipOutcome::debug_cut_violations.
+  // that separates it is counted in MipOutcome::debug_cut_violations. Setting it also checks the
+  // Farkas ray of every infeasible node LP, kept as a proof or not, with verify_infeasibility; a
+  // missing ray counts too (debug_farkas_failures).
   std::vector<double> debug_solution;
 };
 
@@ -95,6 +102,15 @@ struct MipOutcome {
   int cuts_added = 0;             // Cuts in the LP after the root (non-binding ones removed).
   int tree_cuts = 0;              // Tree cuts kept in the LP (pool and fresh).
   long long tree_cuts_separated = 0;  // Tree cuts appended, including those removed again.
+  long long conflicts_found = 0;      // Proofs kept in the conflict pool.
+  long long conflict_prunes = 0;      // Nodes pruned by a stored proof before their LP.
+  long long conflict_infeasible_lps = 0;  // Infeasible node LPs whose Farkas ray was analyzed.
+  long long farkas_proofs = 0;            // Of conflicts_found: proofs from Farkas rays.
+  long long debug_conflict_violations = 0;  // Proofs that exclude debug_solution (must be 0).
+  // Farkas rays of infeasible node LPs (kept as a proof or not) that, mapped to the original rows,
+  // verify_infeasibility rejects on their node's bounds, or missing rays (must be 0; checked only
+  // with debug_solution).
+  long long debug_farkas_failures = 0;
   double root_bound = -kInf;      // Root LP bound before and after cuts, in the model's sense.
   double root_bound_cuts = -kInf;
   long long debug_cut_violations = 0;
@@ -196,6 +212,24 @@ class BranchAndBound {
   void pool_rows(const std::vector<Index>& rows);
   void remove_rows(const std::vector<Index>& rows);
 
+  // Conflict analysis (conflicts.cpp). A node LP that is infeasible or exceeds the cutoff yields a
+  // proof: a combination of the rows (Farkas ray or LP duals) that no point within the node's
+  // bounds satisfies. The proof holds everywhere, so it is stored and propagated at later nodes.
+  struct Conflict {
+    std::vector<Index> index;
+    std::vector<double> value;
+    double lower = -kInf;  // lower <= a'x <= upper, where the upper side of a cutoff proof is
+    double upper = kInf;   // upper + the current cutoff (it tightens as the incumbent improves).
+    bool cutoff_relative = false;
+    long long last_used = 0;  // Node count when it last pruned or tightened.
+  };
+  void analyze_infeasible_lp();
+  void analyze_cutoff_lp();
+  // Keeps a proof  lower <= g'x <= upper  (g over the columns, dense) if it is sparse enough;
+  // returns whether it was kept.
+  bool add_conflict(const std::vector<double>& g, double lower, double upper, bool relative);
+  bool propagate_conflicts(std::vector<BoundChange>* record);
+
   // Search.
   NodeResult process_node(Node& node, std::vector<Node>& children);
   bool propagate(std::vector<Index> changed, std::vector<BoundChange>* record);
@@ -259,6 +293,7 @@ class BranchAndBound {
   // Globally valid cuts not in the LP: root cuts that ended up non-binding. Tree nodes add the ones
   // their LP point violates.
   std::vector<Cut> cut_pool_;
+  std::vector<Conflict> conflicts_;
   double tree_cut_seconds_ = 0.0;
   // Tree cut rounds so far, and those whose cuts stayed in the LP.
   long long tree_cut_rounds_ = 0;
