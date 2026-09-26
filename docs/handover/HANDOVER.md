@@ -78,13 +78,31 @@ Recent MILP work, each item with tests and planted-bug checks (details in `docs/
 1. **Conflict analysis, remaining limit:** a round-off coefficient on a column with an infinite
    bound loses a Farkas proof (the proof cannot be relaxed validly there). Strong-branching
    proofs are in (A/B neutral); their pool pass costs every node, so watch it on large models.
-2. **Clique table beyond cuts:** the conflict graph now feeds only the clique separator; HiGHS
+2. **No first solution on 9 feasible MIPLIB instances** (cost266-UUE, csched007/008,
+   ic97_potential, neos-3024952-loue, neos-5107597-kakapo, the two rococo, fhnw-binpack4-48),
+   where HiGHS, SCIP and CBC mostly find one in 60 s. Diagnosis on rococoC10-001000: Feasibility
+   Jump and the pump fail, RENS is infeasible, and the tree restarts every failed plunge at the
+   best bound near the root. Tried (worktree branch `claude/next-wip`, commit "depth first until
+   the first incumbent"): depth first with backtracking until the first incumbent. It finds
+   solutions on rococoC10/B10, cost266-UUE and kakapo (A/B: solutions 52 -> 54, better 13 /
+   worse 10, solved 12 both) but traps enlight_hard in a deep infeasible region (no incumbent in
+   60 s; best bound finds the optimum), so it is not merged. Next: a hybrid that interleaves
+   best-bound picks with backtracking, justified on principle rather than a node limit fitted
+   to these instances.
+3. **Presolve gap (measured):** HiGHS's presolve removes far more on about a dozen instances
+   (columns after presolve, samaya vs HiGHS: app1-1 2477 vs 1059, milo-v12-6-r2-40-1 2688 vs
+   1698, b1c1s1 3872 vs 2718, beasleyC3 2500 vs 1704, nu25-pr12 5834 vs 4263). Turning HiGHS's
+   rules off one at a time attributes most of it to the aggregator (substituting columns out
+   through equations with limited fill; samaya substitutes only singleton columns). On
+   beasleyC3, nu25-pr12 and n5-3 the reductions come from HiGHS's basic rules, not attributed
+   yet.
+4. **Clique table beyond cuts:** the conflict graph now feeds only the clique separator; HiGHS
    also uses it in propagation and probing. Implied-bound cuts are still missing.
-3. **Symmetry** (fhnw-binpack4-4, graph20-20-1rand): orbital fixing on a simple detector.
+5. **Symmetry** (fhnw-binpack4-4, graph20-20-1rand): orbital fixing on a simple detector.
    Only if time allows.
-4. **Structure cuts for the MRPL models**, e.g. (l,S) inequalities. The cases already solve in
+6. **Structure cuts for the MRPL models**, e.g. (l,S) inequalities. The cases already solve in
    seconds, so this is low priority.
-5. **Final results:**
+7. **Final results:**
    - Netlib, the cases and MIPLIB at 60 s from the laptop are in `docs/results/comparison.md`.
      Still to add: MIPLIB at 600 s.
    - The first laptop 600 s run switched samaya builds mid-run (the release binary was rebuilt
