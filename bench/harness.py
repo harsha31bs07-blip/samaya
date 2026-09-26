@@ -239,6 +239,11 @@ def main() -> int:
                         help="also run a baseline solver: the highs, cbc or glpsol executable on "
                              "PATH, or the highspy / pyscipopt Python module (scip)")
     parser.add_argument("--time-limit", type=float, default=300.0)
+    parser.add_argument("--samaya-clock-factor", type=float, default=1.0,
+                        help="multiply samaya's time limit by this: samaya times its limit on the "
+                             "monotonic clock, the baselines on the real-time clock, and on a "
+                             "machine whose monotonic clock runs fast (WSL2 on some laptops) "
+                             "samaya would stop early; bench/clock_factor.py measures it")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--mip-gap", type=float, default=1e-4,
                         help="relative MIP gap for every solver (default 1e-4)")
@@ -262,7 +267,11 @@ def main() -> int:
         return 1
 
     gap = args.mip_gap
-    solvers = {"samaya": lambda f: run_samaya(args.samaya, f, args.time_limit, args.threads, gap)}
+    samaya_limit = args.time_limit * args.samaya_clock_factor
+    if args.samaya_clock_factor != 1.0:
+        print(f"samaya time limit {samaya_limit:.2f} s on its own clock (factor "
+              f"{args.samaya_clock_factor}), {args.time_limit} s of real time", flush=True)
+    solvers = {"samaya": lambda f: run_samaya(args.samaya, f, samaya_limit, args.threads, gap)}
     for name in args.baseline:
         if name == "highspy":
             solvers[name] = lambda f: run_highspy(f, args.time_limit, args.threads, gap)

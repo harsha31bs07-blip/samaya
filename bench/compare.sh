@@ -10,11 +10,14 @@
 #           miplib600      MIPLIB small (62), 600 s, samaya HiGHS SCIP
 #           miplib600-t6   MIPLIB small (62), 600 s, samaya and HiGHS with 6 threads each
 #                          (HiGHS 1.15 has a parallel MIP solver; use SHARDS 2)
+#           miplib600-samaya  samaya alone on the 600 s set (same instance-to-shard split)
 #   SHARDS  instances run at the same time (default 4; keep SHARDS x threads <= cores)
 #
 # Needs: the release build, python3 with highspy and pyscipopt, cbc and glpsol on PATH, and the
 # instances (bench/fetch_instances.sh netlib; bench/fetch_instances.sh miplib-list
 # bench/miplib_small.test; bench/generate_lps.py --set mip --out bench/instances/generated-mip).
+# SAMAYA_CLOCK_FACTOR (default 1): see bench/clock_factor.py; it gives samaya the same real time as
+# the baselines on a machine whose monotonic clock runs fast.
 # Writes bench/results/compare/SET/shard*.csv and prints each shard's summary; the combined
 # summary is at the end.
 set -euo pipefail
@@ -38,7 +41,7 @@ case "${set_name}" in
     limit=300
     baselines=(highspy scip cbc glpk)
     ;;
-  miplib60 | miplib600 | miplib600-t6)
+  miplib60 | miplib600 | miplib600-t6 | miplib600-samaya)
     dir="bench/instances/miplib_small"
     mapfile -t files < <(grep -v '^#' bench/miplib_small.test | grep -v '^$' |
                          sed "s|^|${dir}/|; s|$|.mps|")
@@ -48,6 +51,8 @@ case "${set_name}" in
     if [[ "${set_name}" == miplib60 ]]; then
       limit=60
       baselines=(highspy scip cbc)
+    elif [[ "${set_name}" == miplib600-samaya ]]; then
+      baselines=()  # samaya alone, to pair with the baselines of an earlier miplib600 run.
     elif [[ "${set_name}" == miplib600-t6 ]]; then
       # Same thread count for both: HiGHS 1.15 searches the tree in parallel too.
       baselines=(highspy)
@@ -70,6 +75,7 @@ for ((k = 0; k < shards; ++k)); do
   for ((i = k; i < ${#files[@]}; i += shards)); do shard+=("${files[i]}"); done
   [[ ${#shard[@]} -gt 0 ]] || continue
   python3 bench/harness.py "${shard[@]}" --samaya "${samaya}" --time-limit "${limit}" \
+    --samaya-clock-factor "${SAMAYA_CLOCK_FACTOR:-1}" \
     --threads "${threads}" "${base_args[@]}" "${solu[@]}" --out "${out}/shard${k}.csv" \
     > "${out}/shard${k}.log" 2>&1 &
 done
