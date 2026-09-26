@@ -117,29 +117,34 @@ schedule from the plan report (`cases/mrpl.py report`).
 
 ## Slide 4: Feasibility and viability
 
-**Feasibility, already shown by working results** (same machine, same settings for all):
+**Feasibility, already shown by working results** (one laptop, Intel Core i5-13450HX, same
+settings for all solvers):
 
 | Test set | samaya | HiGHS | SCIP | CBC | GLPK |
 |---|---|---|---|---|---|
-| Netlib LP, 93 models: solved | **93/93** | 93/93 | 93/93 | 93/93 | 92/93 |
-| Netlib LP: time (geomean) | 0.32 s | 0.17 s | 0.41 s | 0.19 s | 0.76 s |
-| Refinery cases + generated MILPs, 16 models: solved | **16/16** | 16/16 | 16/16 | 16/16 | 12/16 |
-| Refinery cases: time (geomean) | 3.71 s | 4.63 s | 3.18 s | 3.68 s | 19.6 s |
-| MIPLIB 2017, 62 hard MILPs, 60 s: solved | 7 | 16 | 18 | 7 | – |
+| Netlib LP, 93 models: solved | **93/93** | 93/93 | 93/93 | 93/93 | 93/93 |
+| Netlib LP: time (geomean) | 0.36 s | 0.19 s | 0.47 s | 0.20 s | 0.42 s |
+| Refinery cases + generated MILPs, 16 models: solved | **16/16** | 16/16 | 16/16 | 16/16 | 11/16 |
+| Refinery cases: time (geomean) | **3.43 s (fastest)** | 5.18 s | 3.59 s | 4.02 s | 20.8 s |
+| MIPLIB 2017, 62 hard MILPs, 60 s: solved | 13 (was 7 before 26 Sep) | 18 | 19 | 8 | – |
 
-**[FILL]** Replace with the final laptop run if it arrives in time.
+Source: `docs/results/comparison.md`, laptop section (it also has the earlier cloud-machine run,
+where samaya was third on the refinery cases). The MIPLIB run gave every solver the same real
+time (a laptop clock quirk, corrected and explained there). samaya solves 4 MIPLIB instances
+that neither HiGHS nor SCIP solves in 60 s. **[FILL]** Add the 600 s MIPLIB row if it arrives
+in time.
 
 - **Correctness:** no wrong answer on any instance; every result is cross-checked against the
   other solvers and published optimal values.
 - On Netlib, **28 of 29 infeasible models are proven infeasible with a certificate**.
-- samaya solves **3 MIPLIB instances that neither HiGHS nor SCIP solves in 60 s**
-  (markshare_4_0, mas76, pk1).
+- samaya solves **4 MIPLIB instances that neither HiGHS nor SCIP solves in 60 s**
+  (markshare_4_0, neos5, mas76, pk1).
 
 **Challenges and risks → how we handle them:**
 
 | Challenge | Strategy |
 |---|---|
-| Hard MILPs: mature solvers have 10–15 years of techniques | We add the proven techniques one at a time and measure each on fixed test sets. Since the table above: Feasibility Jump (+5 instances with a solution) and cuts in the tree; conflict analysis is in progress. |
+| Hard MILPs: mature solvers have 10–15 years of techniques | We add the proven techniques one at a time and measure each on fixed test sets. Since 26 September: conflict analysis, cut-set flow covers on network models (p200x1188c from unsolved to 3 s), clique cuts; MIPLIB solved at 60 s went from 7 to 13. |
 | Numerical errors (wrong answers) | Independent verifier; automatic re-solve with tighter tolerances; tests against a reference solver; deliberately planted bugs must be caught by the tests. |
 | Very large LPs | GPU PDLP (first-order method), with the simplex polishing the result. |
 | Adoption | Standard MPS input, a CLI and APIs; it runs on ordinary hardware. |

@@ -84,6 +84,111 @@ Solve times of every instance samaya solves (seconds; "–" = not solved in 60 s
 After this run, the child-selection change (90f8df0) raised samaya's screening to 48 feasible
 (from 46) at the same 7 solved. The next same-machine comparison will include it.
 
+## Laptop runs (Dell G15, 26 September)
+
+The same sets on the owner's laptop, never mixed with the cloud numbers above.
+- **Machine:** Intel Core i5-13450HX (10 cores: 6 performance, 4 efficiency; 16 threads), 12 GB
+  of memory in WSL2.
+- **Solvers:** HiGHS 1.15.1, SCIP 10.0, CBC 2.10.11, GLPK 5.0. Every solver single-threaded with
+  the 1e-4 gap, 4 instances at a time, as above. SCIP's "gaplimit" status (stopped at the
+  requested gap) counts as solved.
+- **Builds:** netlib and the cases use 51be19c (tree cuts and the MIP start); MIPLIB at 60 s uses
+  0ffd224 (Feasibility Jump, before the tree cuts). The LP code is the same in both.
+- **Load:** netlib and the cases ran while the 600 s MIPLIB run was going, so up to 8 solver
+  processes shared the 10 cores. MIPLIB at 60 s ran alone. Every solver in a set ran under the
+  same load.
+- **Clock:** the WSL2 kernel clock on this laptop ran about 7% fast (90 s on it took 84 s of real
+  time). The harness times every solver on that clock, so all laptop times read about 7% high
+  and stay comparable with each other. But samaya times its limit on the same clock, while HiGHS,
+  SCIP, CBC and GLPK use the real time: at the 60 s limit they stopped at a median of 63.5 s
+  (CBC 64.7 s) as measured, samaya at 60.0 s. samaya thus had about 6% less time on every
+  unsolved instance. One solve falls in that margin: HiGHS on neos-3627168-kasai at 63.4 s.
+- No two solvers disagree on any instance, and every optimal samaya result passed the verifier.
+
+### Netlib LP (93 instances, 300 s)
+
+| Solver | Solved | Shifted geomean |
+|---|---|---|
+| HiGHS | 93/93 | 0.19 s |
+| CBC (Clp) | 93/93 | 0.20 s |
+| **samaya** | **93/93** | **0.36 s** |
+| GLPK | 93/93 | 0.42 s |
+| SCIP (SoPlex) | 93/93 | 0.47 s |
+
+The order matches the cloud run, except that GLPK (93/93 after the e226 harness fix) moves ahead
+of SCIP.
+
+### MRPL case studies and generated MILPs (16 instances, 300 s)
+
+| Solver | Solved | Shifted geomean |
+|---|---|---|
+| **samaya** | **16/16** | **3.43 s** |
+| SCIP | 16/16 | 3.59 s |
+| CBC | 16/16 | 4.02 s |
+| HiGHS | 16/16 | 5.18 s |
+| GLPK | 11/16 | 20.8 s |
+
+samaya has the lowest shifted geomean here, about 4.5% below SCIP's; on the cloud machine it was
+third. The two instances with the largest differences, which roughly cancel against SCIP:
+
+| Instance | samaya | HiGHS | SCIP | CBC | GLPK |
+|---|---|---|---|---|---|
+| knapsack_80x5 | **17.2** | 284.0 | 55.0 | 30.9 | – |
+| refsched_8c_6p_3u_26t | 122.6 | **47.0** | 51.3 | 132.2 | – |
+
+(Seconds; "–" = not solved in 300 s.) The largest refinery-scheduling model is the one case
+where both HiGHS and SCIP are more than twice as fast as samaya (elsewhere only on models solved
+in under a second). On the nine MRPL cases every solver but GLPK finishes within 5 s.
+
+### MIPLIB 2017, 62 small "easy" instances, 60 s
+
+Two runs on this laptop. The final one (26-27 September, build 528b3ab: conflict analysis, the
+cut-set flow covers) gave samaya the same real time as the others (`SAMAYA_CLOCK_FACTOR=1.052`,
+measured against Windows' clock just before; see the clock note above). The earlier one (build
+0ffd224, before tonight's work) ran with the plain limit, so samaya had about 6% less time.
+
+| Solver | Solved | Shifted geomean | With a solution |
+|---|---|---|---|
+| SCIP | 19/62 | 38.10 s | 56 |
+| HiGHS | 18/62 | 40.97 s | 57 |
+| **samaya** (528b3ab) | **13/62** | **46.69 s** | 54 |
+| CBC | 8/62 | 54.06 s | 55 |
+| samaya (0ffd224, earlier run) | 7/62 | 50.33 s | 53 |
+
+The baselines of the earlier run: SCIP 19, HiGHS 18, CBC 8, the same counts.
+
+Solve times of every instance samaya solves (seconds, final run; "–" = not solved in 60 s):
+
+| Instance | samaya | HiGHS | SCIP | CBC |
+|---|---|---|---|---|
+| markshare_4_0 | **15.1** | – | – | – |
+| neos5 | **42.0** | – | – | – |
+| mas76 | **19.1** | – | – | 33.5 |
+| pk1 | **29.7** | – | – | 38.3 |
+| exp-1-500-5-5 | **1.1** | 3.4 | 2.5 | – |
+| neos859080 (infeasible) | **0.4** | 1.4 | 0.6 | – |
+| p200x1188c | 3.0 | **0.6** | 4.1 | – |
+| app1-1 | 13.5 | 18.9 | 6.4 | **4.7** |
+| neos17 | 14.1 | 7.0 | **6.1** | – |
+| enlight_hard | 29.1 | 11.6 | **0.0** | – |
+| binkar10_1 | 49.4 | **21.0** | 26.5 | – |
+| nu25-pr12 | 54.5 | 5.6 | **4.2** | 28.4 |
+| sp150x300d | 0.6 | **0.1** | 0.3 | – |
+
+- samaya solves four instances that neither HiGHS nor SCIP solves in 60 s: markshare_4_0,
+  neos5, mas76 and pk1.
+- HiGHS or SCIP solve 11 that samaya does not: beasleyC3, mc11, n5-3 (big-M networks, much
+  closer since the cut-set fix), graph20-20-1rand and fhnw-binpack4-4 (symmetry),
+  mik-250-20-75-4, neos-911970, pg, timtab1, neos-3381206-awhea and neos-3627168-kasai.
+- No two solvers disagree on any instance, and every optimal samaya result passed the verifier.
+  samaya's infeasibility claim on neos859080 is not certificate-checked (the verifier has no
+  certificate for MILP infeasibility); HiGHS, SCIP and the MIPLIB reference agree with it.
+
+Since this run: rotating aggregation starts and clique cuts (f0cbe85; bound A/B in
+docs/MILP_PLAN.md).
+
+MIPLIB at 600 s and with 6 threads: to follow.
+
 ## Verified results: what samaya checks, and what the others do
 
 Every answer samaya reports is checked by `src/verify/`, an independent checker that shares no
