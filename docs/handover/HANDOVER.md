@@ -78,12 +78,17 @@ Recent MILP work, each item with tests and planted-bug checks (details in `docs/
 1. **Conflict analysis, remaining limit:** a round-off coefficient on a column with an infinite
    bound loses a Farkas proof (the proof cannot be relaxed validly there). Strong-branching
    proofs are in (A/B neutral); their pool pass costs every node, so watch it on large models.
-2. **Clique table and implied-bound cuts** for the weak big-M bounds (p200x1188c, mc11).
-3. **Symmetry** (fhnw-binpack4-4, graph20-20-1rand): orbital fixing on a simple detector.
+2. **Rotate the aggregation start window** (`separate_aggregated_mir`, `kMaxAggregationStarts`):
+   starts are taken in row order up to 300 per call, so on mc11 38 of 212 demand nodes never get
+   a cut-set cut (a cap of 1000 lifts its root bound from 9933 to 11281, optimum 11689). Start
+   each call where the previous one stopped instead of raising the constant.
+3. **Clique table and implied-bound cuts.** The big-M network gaps were mostly the cut-set
+   inequalities (now separated); check what is left on beasleyC3, n5-3 and mc11 first.
+4. **Symmetry** (fhnw-binpack4-4, graph20-20-1rand): orbital fixing on a simple detector.
    Only if time allows.
-4. **Structure cuts for the MRPL models**, e.g. (l,S) inequalities. The cases already solve in
+5. **Structure cuts for the MRPL models**, e.g. (l,S) inequalities. The cases already solve in
    seconds, so this is low priority.
-5. **Final results:**
+6. **Final results:**
    - Netlib, the cases and MIPLIB at 60 s from the laptop are in `docs/results/comparison.md`.
      Still to add: MIPLIB at 600 s.
    - The first laptop 600 s run switched samaya builds mid-run (the release binary was rebuilt

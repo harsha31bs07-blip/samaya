@@ -290,6 +290,72 @@ Model multi_knapsack(std::mt19937& rng) {
   return model;
 }
 
+// Transshipment network with big-M arcs in both directions between linked nodes, as in
+// p200x1188c and mc11 (every link there is an arc pair). A demand node then also has outflows,
+// so the flow cover on the <= side of its balance row, x_a <= d y_a + (M - d) (outflows' y), is
+// weak; the >= side gives the cut-set inequality: some inflow arc must be open. Node 0 supplies
+// everything; `arcs` returns each arc's (tail, head), flows first, then their binaries.
+Model transshipment_network(std::mt19937& rng, std::vector<std::pair<int, int>>& arcs) {
+  // A big M far above every demand (d / M < 0.05, as on mc11: 1 / 212): c-MIR rejects such a
+  // fraction, so the flow covers must produce the cut-set inequalities.
+  constexpr double kBigM = 1000.0;
+  const auto uniform_int = [&](int lo, int hi) {
+    return std::uniform_int_distribution<int>(lo, hi)(rng);
+  };
+  const int nodes = uniform_int(4, 6);
+  std::vector<double> demand(static_cast<std::size_t>(nodes), 0.0);
+  double supply = 0.0;
+  for (int v = 1; v < nodes; ++v) {
+    demand[v] = uniform_int(1, 6);
+    supply += demand[v];
+  }
+  demand[0] = -supply;
+  arcs.clear();
+  const auto link = [&](int a, int b) {
+    arcs.push_back({a, b});
+    arcs.push_back({b, a});
+  };
+  for (int v = 1; v < nodes; ++v) link(uniform_int(0, v - 1), v);  // Connected.
+  const int extra = uniform_int(1, 2);
+  for (int k = 0; k < extra; ++k) {
+    const int a = uniform_int(0, nodes - 1);
+    const int b = uniform_int(0, nodes - 1);
+    if (a != b) link(a, b);
+  }
+  Model model;
+  std::vector<samaya::Triplet> t;
+  const auto na = static_cast<Index>(arcs.size());
+  for (Index a = 0; a < na; ++a) {
+    model.obj.push_back(uniform_int(1, 5));
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(kInf);
+    model.col_type.push_back(samaya::VarType::kContinuous);
+  }
+  for (Index a = 0; a < na; ++a) {
+    model.obj.push_back(uniform_int(10, 60));
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(1);
+    model.col_type.push_back(samaya::VarType::kInteger);
+  }
+  Index row = 0;
+  for (int v = 0; v < nodes; ++v, ++row) {  // inflow - outflow = demand.
+    for (Index a = 0; a < na; ++a) {
+      if (arcs[a].second == v) t.push_back({row, a, 1.0});
+      if (arcs[a].first == v) t.push_back({row, a, -1.0});
+    }
+    model.row_lower.push_back(demand[v]);
+    model.row_upper.push_back(demand[v]);
+  }
+  for (Index a = 0; a < na; ++a, ++row) {
+    t.push_back({row, a, 1.0});
+    t.push_back({row, na + a, -kBigM});
+    model.row_lower.push_back(-kInf);
+    model.row_upper.push_back(0.0);
+  }
+  model.A = samaya::SparseMatrix::from_triplets(row, 2 * na, std::move(t));
+  return model;
+}
+
 // Fixed-charge network flow with big-M arcs (x_a <= M y_a, M = total supply), as in p200x1188c
 // and mc11: flow conservation rows over continuous flows only, so c-MIR finds nothing and the
 // root gap needs flow covers.
@@ -1050,6 +1116,220 @@ TEST(mip_flow_covers_on_big_m_networks) {
   CHECK_EQ(violations, 0);
   CHECK(models > 150);
   CHECK(average > 0.3);
+}
+
+TEST(mip_root_cuts_are_valid_on_transshipment_networks) {
+  // Root cuts on transshipment networks (every link an arc pair, as on p200x1188c and mc11): no
+  // cut may separate the optimum. The root bound is reported against the LP with every
+  // single-node cut-set inequality added (each demand node has an open inflow arc); on models
+  // this small the other cuts reach it too, so the separator tests above check the mechanism.
+  const samaya::Logger quiet(0);
+  std::mt19937 rng(92);
+  long long violations = 0;
+  int models = 0;
+  int gaps = 0;
+  int reached = 0;
+  double closed = 0.0;
+  std::vector<std::pair<int, int>> arcs;
+  for (int k = 0; k < 150; ++k) {
+    const Model model = transshipment_network(rng, arcs);
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    // The LP with the cut-set rows: sum of y_a over the arcs into v >= 1 for each demand node v.
+    Model with_cut_sets = model;
+    {
+      const auto na = static_cast<Index>(arcs.size());
+      std::vector<samaya::Triplet> t;
+      const auto start = model.A.col_start();
+      const auto index = model.A.row_index();
+      const auto value = model.A.values();
+      for (Index j = 0; j < model.num_cols(); ++j) {
+        for (samaya::NnzIndex p = start[j]; p < start[j + 1]; ++p) {
+          t.push_back({index[p], j, value[p]});
+        }
+      }
+      Index row = model.num_rows();
+      int max_node = 0;
+      for (const auto& [a, b] : arcs) max_node = std::max({max_node, a, b});
+      for (int v = 1; v <= max_node; ++v, ++row) {
+        for (Index a = 0; a < na; ++a) {
+          if (arcs[a].second == v) t.push_back({row, na + a, 1.0});
+        }
+        with_cut_sets.row_lower.push_back(1.0);
+        with_cut_sets.row_upper.push_back(kInf);
+      }
+      with_cut_sets.A = samaya::SparseMatrix::from_triplets(row, model.num_cols(), std::move(t));
+    }
+    const samaya::test::ReferenceResult cut_set_lp =
+        samaya::test::ReferenceLp(with_cut_sets).solve();
+    REQUIRE(cut_set_lp.status == samaya::test::ReferenceResult::Status::kOptimal);
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    options.probing = false;
+    options.heuristics = false;
+    options.debug_solution = ref.x;
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    ++models;
+    violations += out.debug_cut_violations;
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+    const double target = cut_set_lp.objective;
+    const double gap = target - out.root_bound;
+    if (gap > 1e-6 * (1.0 + std::fabs(target))) {
+      ++gaps;
+      closed += std::min(1.0, (out.root_bound_cuts - out.root_bound) / gap);
+      if (out.root_bound_cuts >= target - 1e-6 * (1.0 + std::fabs(target))) ++reached;
+    }
+  }
+  const double average = gaps > 0 ? closed / gaps : 0.0;
+  std::printf("  %d transshipment networks, %d with a cut-set gap: %.0f%% of it closed on "
+              "average, bound reached on %d, %lld violations\n",
+              models, gaps, 100.0 * average, reached, violations);
+  CHECK_EQ(violations, 0);
+  CHECK(models > 100);
+  CHECK(gaps > 0);
+}
+
+TEST(mip_flow_cover_separates_the_cut_set_side_of_a_transit_node) {
+  // A demand node that also forwards flow: x1 + x2 - x3 = d (inflows 1, 2; outflow 3), with
+  // x_a <= M y_a and M >> d. At the LP point x1 = d, y1 = d / M, and the outflow arc is open
+  // (y3 = 1) without flow. The <= side's flow cover, x_a <= d y_a + (M - d) y3, holds there;
+  // only the >= side gives a violated cut: an inflow arc must be open (d y1 + d y2 >= d, or with
+  // x2 for y2). Every cut must hold at every integer-feasible point.
+  constexpr double kDemand = 7.0;
+  constexpr double kBigM = 1000.0;  // d / M < 0.05: c-MIR cannot cut here.
+  Model model;
+  for (int a = 0; a < 3; ++a) {
+    model.obj.push_back(1.0);
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(kInf);
+    model.col_type.push_back(samaya::VarType::kContinuous);
+  }
+  for (int a = 0; a < 3; ++a) {
+    model.obj.push_back(20.0);
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(1);
+    model.col_type.push_back(samaya::VarType::kInteger);
+  }
+  std::vector<samaya::Triplet> t = {{0, 0, 1.0}, {0, 1, 1.0}, {0, 2, -1.0}};
+  model.row_lower = {kDemand};
+  model.row_upper = {kDemand};
+  for (Index a = 0; a < 3; ++a) {
+    t.push_back({1 + a, a, 1.0});
+    t.push_back({1 + a, 3 + a, -kBigM});
+    model.row_lower.push_back(-kInf);
+    model.row_upper.push_back(0.0);
+  }
+  model.A = samaya::SparseMatrix::from_triplets(4, 6, std::move(t));
+  const samaya::SparseMatrix at = model.A.transpose();
+  const std::vector<double> x = {kDemand, 0, 0, kDemand / kBigM, 0, 1};
+  const samaya::CutContext ctx{model, at, model.col_lower, model.col_upper, x, 4};
+  std::vector<samaya::Cut> cuts;
+  samaya::separate_aggregated_mir(ctx, cuts);
+  double best_violation = 0.0;
+  int invalid = 0;
+  for (const samaya::Cut& c : cuts) {
+    const auto activity = [&](const std::vector<double>& p) {
+      double sum = 0.0;
+      for (std::size_t k = 0; k < c.index.size(); ++k) sum += c.value[k] * p[c.index[k]];
+      return sum;
+    };
+    best_violation = std::max(best_violation, c.lower - activity(x));
+    // Integer-feasible points: any open arcs, the inflow d + x3 on one open inflow arc, and
+    // x3 in {0, 5} when the outflow arc is open.
+    for (int open = 0; open < 8; ++open) {
+      for (int carrier = 0; carrier < 2; ++carrier) {
+        if (!(open >> carrier & 1)) continue;
+        for (const double out : {0.0, 5.0}) {
+          if (out > 0.0 && !(open >> 2 & 1)) continue;
+          std::vector<double> p(6, 0.0);
+          p[carrier] = kDemand + out;
+          p[2] = out;
+          for (int a = 0; a < 3; ++a) p[3 + a] = open >> a & 1;
+          if (activity(p) < c.lower - 1e-9) ++invalid;
+        }
+      }
+    }
+  }
+  // The same LP point with the flow moved to inflow arc 2: a cut that wrote the unused inflow as
+  // x2 (not d y2) no longer cuts it off, and the LP would just reroute round after round.
+  const std::vector<double> rerouted = {0, kDemand, 0, 0, kDemand / kBigM, 1};
+  double rerouted_violation = 0.0;
+  for (const samaya::Cut& c : cuts) {
+    double sum = 0.0;
+    for (std::size_t k = 0; k < c.index.size(); ++k) sum += c.value[k] * rerouted[c.index[k]];
+    rerouted_violation = std::max(rerouted_violation, c.lower - sum);
+  }
+  std::printf("  %zu cuts, largest violation of the LP point %.3f (rerouted %.3f), %d invalid\n",
+              cuts.size(), best_violation, rerouted_violation, invalid);
+  CHECK_EQ(invalid, 0);
+  CHECK(best_violation > 0.5);  // d y1 + d y2 >= d is violated by d (1 - d / M) = 6.95.
+  CHECK(rerouted_violation > 0.5);
+}
+
+TEST(mip_flow_cover_separates_the_cut_set_side_of_a_balance_row) {
+  // x0 + x1 + x2 = d: an uncapacitated backup supply x0 (no binary) and two arcs x_a <= M y_a,
+  // arc 1 also capped at d / 2. At the LP point x0 = x1 = d / 2, y1 = x1 / M: every flow of an
+  // arc sits at a simple bound, so only the balance row is a start row (as on mc11, where the
+  // start cap is used up by balance rows). Its >= side gives d y1 + d y2 + x0 >= d, violated by
+  // d / 2 - d y1; its <= side cuts nothing here.
+  constexpr double kDemand = 7.0;
+  constexpr double kBigM = 1000.0;
+  Model model;
+  model.obj = {50.0, 1.0, 1.0, 20.0, 20.0};
+  model.col_lower = {0, 0, 0, 0, 0};
+  model.col_upper = {kInf, kDemand / 2, kInf, 1, 1};
+  model.col_type = {samaya::VarType::kContinuous, samaya::VarType::kContinuous,
+                    samaya::VarType::kContinuous, samaya::VarType::kInteger,
+                    samaya::VarType::kInteger};
+  std::vector<samaya::Triplet> t = {{0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0}, {1, 1, 1.0},
+                                    {1, 3, -kBigM}, {2, 2, 1.0}, {2, 4, -kBigM}};
+  model.row_lower = {kDemand, -kInf, -kInf};
+  model.row_upper = {kDemand, 0.0, 0.0};
+  model.A = samaya::SparseMatrix::from_triplets(3, 5, std::move(t));
+  const samaya::SparseMatrix at = model.A.transpose();
+  const std::vector<double> x = {kDemand / 2, kDemand / 2, 0, kDemand / 2 / kBigM, 0};
+  const samaya::CutContext ctx{model, at, model.col_lower, model.col_upper, x, 3};
+  std::vector<samaya::Cut> cuts;
+  samaya::separate_aggregated_mir(ctx, cuts);
+  double best_violation = 0.0;
+  int invalid = 0;
+  for (const samaya::Cut& c : cuts) {
+    const auto activity = [&](const std::vector<double>& p) {
+      double sum = 0.0;
+      for (std::size_t k = 0; k < c.index.size(); ++k) sum += c.value[k] * p[c.index[k]];
+      return sum;
+    };
+    best_violation = std::max(best_violation, c.lower - activity(x));
+    // Integer-feasible points: any open arcs; the demand from one open arc (arc 1 up to d / 2),
+    // the rest from the backup.
+    for (int open = 0; open < 4; ++open) {
+      for (int carrier = -1; carrier < 2; ++carrier) {
+        if (carrier >= 0 && !(open >> carrier & 1)) continue;
+        std::vector<double> p(5, 0.0);
+        if (carrier >= 0) p[1 + carrier] = carrier == 0 ? kDemand / 2 : kDemand;
+        p[0] = kDemand - p[1] - p[2];
+        p[3] = open & 1;
+        p[4] = open >> 1 & 1;
+        if (activity(p) < c.lower - 1e-9) ++invalid;
+      }
+    }
+  }
+  // The same point with arc 2 carrying the flow instead: the cut-set inequality covers both
+  // arcs, so it cuts this point off too.
+  const std::vector<double> rerouted = {kDemand / 2, 0, kDemand / 2, 0, kDemand / 2 / kBigM};
+  double rerouted_violation = 0.0;
+  for (const samaya::Cut& c : cuts) {
+    double sum = 0.0;
+    for (std::size_t k = 0; k < c.index.size(); ++k) sum += c.value[k] * rerouted[c.index[k]];
+    rerouted_violation = std::max(rerouted_violation, c.lower - sum);
+  }
+  std::printf("  %zu cuts, largest violation of the LP point %.3f (rerouted %.3f), %d invalid\n",
+              cuts.size(), best_violation, rerouted_violation, invalid);
+  CHECK_EQ(invalid, 0);
+  CHECK(best_violation > 0.5);  // d y1 + d y2 + x0 >= d: violated by d / 2 - d y1 = 3.475.
+  CHECK(rerouted_violation > 0.5);
 }
 
 TEST(mip_flow_cover_separates_single_node_big_m) {

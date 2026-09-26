@@ -654,7 +654,12 @@ bool flow_cover_on_aggregate(const CutContext& ctx, const Aggregate& agg,
         }
       }
     } else {
-      const bool use_y = f.y == -1 ? lambda < f.z : lambda * f.ylp < f.z;
+      // On a tie (x = y = 0 at the LP point) a variable-bound flow enters as lambda y, which
+      // stays strong wherever the LP reroutes flow through it (x = M y there); a binary's
+      // own flow keeps x.
+      const bool use_y = f.y == -1        ? lambda < f.z
+                         : f.y == f.x    ? lambda * f.ylp < f.z
+                                         : lambda * f.ylp <= f.z;
       if (use_y) {
         if (f.y >= 0) {
           builder.add(f.y, -lambda);
@@ -717,13 +722,15 @@ void separate_aggregated_mir(const CutContext& ctx, std::vector<Cut>& cuts) {
   std::vector<Index> used;
 
   for (const Index i0 : starts) {
-    // The side the LP point is closer to (both for equalities: the upper one).
+    // Both finite sides, for an equality too: c-MIR and flow covers give different cuts for
+    // a'x <= b and -a'x <= -b. On a demand node's balance row (inflow - outflow = d) the <= side
+    // gives x_a <= d y_a + (M - d) (outflows' y), the >= side the cut-set inequality
+    // d (inflows' y) + (unused inflows' x) >= d.
     const double ru = model.row_upper[i0];
     const double rl = model.row_lower[i0];
     for (int side = 0; side < 2; ++side) {
       const double lambda = side == 0 ? 1.0 : -1.0;
       if (!std::isfinite(side == 0 ? ru : rl)) continue;
-      if (rl == ru && side == 1) continue;  // An equality aggregates the same both ways.
       agg.clear();
       agg.add_row(ctx, i0, lambda);
       used.assign(1, i0);

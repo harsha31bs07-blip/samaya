@@ -131,6 +131,24 @@ above, which ignores such instances.
     the integer below the cutoff for integral objectives, and only cut-off proofs that exclude
     their own LP. Bound A/B against the above: neutral (solved 8 -> 9, bound better on 11, worse
     on 15, mean distance unchanged at 22.25%).
+- **Cut-set flow covers on big-M networks** (`src/mip/cuts.cpp`, found by reading p200x1188c and
+  mc11 after the laptop results):
+  - The aggregated separator skipped the >= side of equality rows ("an equality aggregates the
+    same both ways"), but c-MIR and flow covers give different cuts for a'x <= b and -a'x <= -b.
+    On a demand node's balance row the >= side gives the cut-set inequality: some inflow arc must
+    be open.
+  - On a tie at the LP point (x = y = 0) a variable-bound flow now enters the cut as lambda y, not
+    x, so the cut stays strong where the LP reroutes flow (x = M y there).
+  - Root bound: p200x1188c 6020 -> 12829 (solved in 3.7 s), mc11 1158 -> 9933 (optimum 11689).
+    Each half alone: p200x1188c 12376 / 6031, mc11 1165 / 7240 (tie rule / both sides).
+  - Bound A/B, 60 s: solved 8 -> 10; shifted geomean 50.56 -> 48.85 s; bound better on 16, worse
+    on 11; mean distance 22.01% -> 19.20%, median 7.22% -> 5.47%. mc11 89.8% -> 16.1%,
+    p200x1188c solved, beasleyC3 40.2% -> 10.5%, lotsize 55.7% -> 37.2%. Largest losses
+    tr12-30 2.8% -> 4.2%, csched007 14.7% -> 16.2%, n5-3 15.3% -> 16.7%.
+  - Not included: mc11 has more qualifying start rows than the cap of 300 per call, taken in row
+    order, so 38 of its 212 demand nodes never start an aggregation. A cap of 1000 gives mc11 a
+    root bound of 11281; the principled fix is to rotate the start window between calls, not a
+    larger constant chosen on mc11.
 
 **Next, from the per-instance analysis** ([results/comparison.md](results/comparison.md)):
 - neos-3381206-awhea now has a solution (Feasibility Jump) but its bound is stuck at 416 with no
