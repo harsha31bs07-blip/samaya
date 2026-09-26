@@ -39,11 +39,22 @@ void separate_mir(const CutContext& ctx, std::vector<Cut>& cuts);
 // Aggregated c-MIR (Marchand and Wolsey): rows are combined to eliminate continuous columns far
 // from their bounds, and each aggregation is tried with bound substitution, including variable
 // bounds x <= c y and x >= c y on binaries (flow-cover strength on fixed-charge models).
-void separate_aggregated_mir(const CutContext& ctx, std::vector<Cut>& cuts);
+// A call starts aggregations from at most a fixed number of rows, taken from first_row on and
+// wrapping around; it returns the row the next call should start from, so that over successive
+// rounds every row gets its turn (on mc11 the balance rows alone exceed the cap).
+Index separate_aggregated_mir(const CutContext& ctx, std::vector<Cut>& cuts, Index first_row = 0);
 
 // Lifted (extended) knapsack cover cuts from rows over binary columns; other columns are
 // relaxed to their bounds.
 void separate_knapsack_covers(const CutContext& ctx, std::vector<Cut>& cuts);
+
+// Clique cuts (Atamtuerk, Nemhauser and Savelsbergh, "Conflict graphs in solving integer
+// programming problems", EJOR 2000). Two binary literals (x_j or 1 - x_j) conflict when their
+// weights in a row exceed its room with every other column at its most favourable bound; each row
+// gives the clique of its heaviest literals. Separation grows a clique greedily from each
+// fractional literal over the conflict graph (largest LP value first) and keeps it if the LP
+// point violates  sum of its literals <= 1.
+void separate_cliques(const CutContext& ctx, std::vector<Cut>& cuts);
 
 // Makes a cut numerically safe or rejects it: drops tiny coefficients (relaxing the right-hand
 // side through the column bounds), rejects large coefficient ranges, relaxes the right-hand side

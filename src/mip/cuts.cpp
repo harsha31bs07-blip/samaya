@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <numeric>
+#include <set>
 
 namespace samaya {
 
@@ -689,7 +690,7 @@ double simple_bound_distance(const CutContext& ctx, Index j) {
 
 }  // namespace
 
-void separate_aggregated_mir(const CutContext& ctx, std::vector<Cut>& cuts) {
+Index separate_aggregated_mir(const CutContext& ctx, std::vector<Cut>& cuts, Index first_row) {
   const Model& model = ctx.model;
   const Index n = model.num_cols();
   const auto rstart = ctx.At.col_start();
@@ -702,10 +703,18 @@ void separate_aggregated_mir(const CutContext& ctx, std::vector<Cut>& cuts) {
   std::vector<double> activity(static_cast<std::size_t>(model.num_rows()), 0.0);
   model.A.multiply(ctx.x, activity);
 
-  // Starting rows: those with a continuous column away from its substituted bound.
+  // Starting rows: those with a continuous column away from its substituted bound, from
+  // first_row on (wrapping around) until the cap; the next call continues where this one stopped.
   std::vector<Index> starts;
-  for (Index i = 0; i < ctx.original_rows && static_cast<int>(starts.size()) <
-                                                 kMaxAggregationStarts; ++i) {
+  const Index rows = ctx.original_rows;
+  Index next_row = 0;
+  if (first_row < 0 || first_row >= rows) first_row = 0;
+  for (Index k = 0; k < rows; ++k) {
+    const Index i = first_row + k < rows ? first_row + k : first_row + k - rows;
+    if (static_cast<int>(starts.size()) >= kMaxAggregationStarts) {
+      next_row = i;
+      break;
+    }
     if (rstart[i + 1] - rstart[i] > kMaxRowLength) continue;
     const auto index = ctx.At.row_index();
     for (NnzIndex p = rstart[i]; p < rstart[i + 1]; ++p) {
@@ -782,6 +791,7 @@ void separate_aggregated_mir(const CutContext& ctx, std::vector<Cut>& cuts) {
       }
     }
   }
+  return next_row;
 }
 
 void separate_knapsack_covers(const CutContext& ctx, std::vector<Cut>& cuts) {
@@ -878,6 +888,158 @@ void separate_knapsack_covers(const CutContext& ctx, std::vector<Cut>& cuts) {
       Cut cut = builder.take(rhs, -1.0);
       if (finalize_cut(ctx, cut)) cuts.push_back(std::move(cut));
     }
+  }
+}
+
+namespace {
+
+// A literal is 2 j (x_j = 1) or 2 j + 1 (x_j = 0).
+constexpr int kMaxCliqueSeeds = 500;        // Fractional literals tried per call.
+constexpr long long kMaxCliqueWork = 2000000;  // Neighbour visits per call (dense graphs).
+
+}  // namespace
+
+void separate_cliques(const CutContext& ctx, std::vector<Cut>& cuts) {
+  const Model& model = ctx.model;
+  const Index n = model.num_cols();
+  const auto start = ctx.At.col_start();
+  const auto index = ctx.At.row_index();
+  const auto value = ctx.At.values();
+  const auto is_binary = [&](Index j) {
+    return is_integer_col(model, j) && ctx.lower[j] == 0.0 && ctx.upper[j] == 1.0;
+  };
+
+  // Clique table: from each row side, its heaviest literals that pairwise exceed the room.
+  std::vector<std::vector<Index>> cliques;
+  struct Item {
+    Index lit;
+    double w;
+  };
+  std::vector<Item> items;
+  for (Index i = 0; i < ctx.original_rows; ++i) {
+    if (start[i + 1] - start[i] > kMaxRowLength || start[i + 1] - start[i] < 2) continue;
+    for (int side = 0; side < 2; ++side) {
+      const double bound = side == 0 ? model.row_upper[i] : model.row_lower[i];
+      if (!std::isfinite(bound)) continue;
+      const double sign = side == 0 ? 1.0 : -1.0;
+      double room = sign * bound;  // For  sum sign a_j x_j <= sign bound.
+      items.clear();
+      bool ok = true;
+      for (NnzIndex p = start[i]; p < start[i + 1]; ++p) {
+        const Index j = index[p];
+        const double w = sign * value[p];
+        if (w == 0.0) continue;
+        if (!is_binary(j)) {
+          const double least = w > 0.0 ? w * ctx.lower[j] : w * ctx.upper[j];
+          if (!std::isfinite(least)) {
+            ok = false;
+            break;
+          }
+          room -= least;
+        } else if (w > 0.0) {
+          items.push_back({2 * j, w});  // x_j = 1 uses w of the room.
+        } else {
+          room -= w;                         // w x_j = w - w (1 - x_j):
+          items.push_back({2 * j + 1, -w});  // x_j = 0 uses -w of it.
+        }
+      }
+      if (!ok || items.size() < 2 || room < 0.0) continue;
+      std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) { return a.w > b.w; });
+      // Round-off must never create a conflict: two literals conflict only if they exceed the
+      // room by a margin.
+      const double eps = 1e-9 * (1.0 + std::fabs(room));
+      std::size_t k = 1;
+      while (k < items.size() && items[k - 1].w + items[k].w > room + eps) ++k;
+      if (k < 2) continue;
+      std::vector<Index> clique;
+      clique.reserve(k);
+      for (std::size_t t = 0; t < k; ++t) clique.push_back(items[t].lit);
+      cliques.push_back(std::move(clique));
+    }
+  }
+  if (cliques.empty()) return;
+  std::vector<std::vector<int>> lit_cliques(static_cast<std::size_t>(2 * n));
+  for (std::size_t c = 0; c < cliques.size(); ++c) {
+    for (const Index l : cliques[c]) lit_cliques[l].push_back(static_cast<int>(c));
+  }
+  const auto lit_value = [&](Index l) { return l % 2 == 0 ? ctx.x[l / 2] : 1.0 - ctx.x[l / 2]; };
+
+  // Seeds: fractional literals with a conflict, largest LP value first.
+  std::vector<Index> seeds;
+  for (Index l = 0; l < 2 * n; ++l) {
+    const double v = lit_value(l);
+    if (!lit_cliques[l].empty() && v > kMinViolation && v < 1.0 - kMinViolation) seeds.push_back(l);
+  }
+  std::sort(seeds.begin(), seeds.end(),
+            [&](Index a, Index b) { return lit_value(a) > lit_value(b); });
+  if (static_cast<int>(seeds.size()) > kMaxCliqueSeeds) seeds.resize(kMaxCliqueSeeds);
+
+  // count[l]: members of the current clique that l conflicts with; stamp[l] marks the literals
+  // already counted for the member being added.
+  std::vector<int> count(static_cast<std::size_t>(2 * n), 0);
+  std::vector<int> stamp(static_cast<std::size_t>(2 * n), -1);
+  std::vector<Index> touched;
+  std::set<std::vector<Index>> found;
+  long long work = 0;
+  CutBuilder builder(ctx);
+  int stamp_id = 0;
+  for (const Index seed : seeds) {
+    if (work > kMaxCliqueWork) break;
+    std::vector<Index> members;
+    // Adds l to the clique and counts it for every literal it conflicts with.
+    const auto add_member = [&](Index l) {
+      members.push_back(l);
+      ++stamp_id;
+      for (const int c : lit_cliques[l]) {
+        for (const Index o : cliques[static_cast<std::size_t>(c)]) {
+          ++work;
+          if (o == l || stamp[o] == stamp_id) continue;
+          stamp[o] = stamp_id;
+          if (count[o] == 0) touched.push_back(o);
+          ++count[o];
+        }
+      }
+    };
+    add_member(seed);
+    double weight = lit_value(seed);
+    for (;;) {
+      // The candidate conflicting with every member that has the largest LP value (a zero one
+      // still makes the clique, and so the cut, stronger elsewhere).
+      Index best = -1;
+      double best_value = -1.0;
+      const auto size = static_cast<int>(members.size());
+      work += static_cast<long long>(touched.size());
+      for (const Index o : touched) {
+        if (count[o] != size) continue;
+        if (std::find(members.begin(), members.end(), o ^ 1) != members.end()) continue;
+        const double v = lit_value(o);
+        if (v > best_value) {
+          best_value = v;
+          best = o;
+        }
+      }
+      if (best < 0) break;
+      add_member(best);
+      weight += std::max(0.0, best_value);
+    }
+    for (const Index o : touched) count[o] = 0;
+    touched.clear();
+    if (members.size() < 2 || weight <= 1.0 + kMinViolation) continue;
+    std::vector<Index> key = members;
+    std::sort(key.begin(), key.end());
+    if (!found.insert(key).second) continue;
+    // sum over x_j literals of x_j + sum over complemented ones of (1 - x_j) <= 1.
+    double rhs = 1.0;
+    for (const Index l : members) {
+      if (l % 2 == 0) {
+        builder.add(l / 2, 1.0);
+      } else {
+        builder.add(l / 2, -1.0);
+        rhs -= 1.0;
+      }
+    }
+    Cut cut = builder.take(rhs, -1.0);
+    if (finalize_cut(ctx, cut)) cuts.push_back(std::move(cut));
   }
 }
 

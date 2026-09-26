@@ -145,10 +145,17 @@ above, which ignores such instances.
     on 11; mean distance 22.01% -> 19.20%, median 7.22% -> 5.47%. mc11 89.8% -> 16.1%,
     p200x1188c solved, beasleyC3 40.2% -> 10.5%, lotsize 55.7% -> 37.2%. Largest losses
     tr12-30 2.8% -> 4.2%, csched007 14.7% -> 16.2%, n5-3 15.3% -> 16.7%.
-  - Not included: mc11 has more qualifying start rows than the cap of 300 per call, taken in row
-    order, so 38 of its 212 demand nodes never start an aggregation. A cap of 1000 gives mc11 a
-    root bound of 11281; the principled fix is to rotate the start window between calls, not a
-    larger constant chosen on mc11.
+  - The aggregation starts now rotate: each call takes its (at most 300) start rows from where
+    the previous call stopped, so every row gets its turn over the rounds. Many models have more
+    start rows than the cap (app1-1, binkar10_1, neos-3627168-kasai, milo-v12-6-r2-40-1, lotsize,
+    neos17, mc11). Bound A/B: mean distance 19.58% -> 19.32%, median 5.90% -> 5.45%, better 13 /
+    worse 14, solved 9 both; mc11 16.2% -> 6.1%, lotsize 39.3% -> 29.2%, n5-3 18.7% -> 13.9%;
+    largest loss beasleyC3 11.7% -> 14.3%.
+- **Clique cuts** (Atamtuerk, Nemhauser and Savelsbergh 2000), `separate_cliques` in
+  `src/mip/cuts.cpp`: a conflict graph over binary literals from every row (the heaviest literals
+  that pairwise exceed the row's room), greedy maximal cliques from the fractional literals. Bound
+  A/B: neutral (better 14, worse 10, mean distance 19.29% -> 19.31%, solved 9 both). On
+  graph20-20-1rand the root finds no violated clique: its gap is symmetry.
 
 **Next, from the per-instance analysis** ([results/comparison.md](results/comparison.md)):
 - neos-3381206-awhea now has a solution (Feasibility Jump) but its bound is stuck at 416 with no

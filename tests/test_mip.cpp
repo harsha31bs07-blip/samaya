@@ -1332,6 +1332,202 @@ TEST(mip_flow_cover_separates_the_cut_set_side_of_a_balance_row) {
   CHECK(rerouted_violation > 0.5);
 }
 
+TEST(mip_aggregation_starts_rotate_over_rounds) {
+  // 350 copies of the balance-row model above, each copy's balance row its only start row: more
+  // start rows than one call takes. Calls that continue where the previous one stopped must give
+  // every copy its cut within a few rounds (with starts always taken from row 0, the copies past
+  // the cap never get one, as happened to 38 of mc11's 212 demand nodes).
+  constexpr int kCopies = 350;
+  constexpr double kDemand = 7.0;
+  constexpr double kBigM = 1000.0;
+  Model model;
+  std::vector<samaya::Triplet> t;
+  std::vector<double> x;
+  for (int u = 0; u < kCopies; ++u) {
+    const auto col = [&](int k) { return static_cast<Index>(5 * u + k); };
+    const auto row = [&](int k) { return static_cast<Index>(3 * u + k); };
+    for (const double c : {50.0, 1.0, 1.0, 20.0, 20.0}) model.obj.push_back(c);
+    for (const double l : {0.0, 0.0, 0.0, 0.0, 0.0}) model.col_lower.push_back(l);
+    for (const double h : {kInf, kDemand / 2, kInf, 1.0, 1.0}) model.col_upper.push_back(h);
+    for (int k = 0; k < 3; ++k) model.col_type.push_back(samaya::VarType::kContinuous);
+    for (int k = 0; k < 2; ++k) model.col_type.push_back(samaya::VarType::kInteger);
+    t.push_back({row(0), col(0), 1.0});
+    t.push_back({row(0), col(1), 1.0});
+    t.push_back({row(0), col(2), 1.0});
+    t.push_back({row(1), col(1), 1.0});
+    t.push_back({row(1), col(3), -kBigM});
+    t.push_back({row(2), col(2), 1.0});
+    t.push_back({row(2), col(4), -kBigM});
+    model.row_lower.push_back(kDemand);
+    model.row_upper.push_back(kDemand);
+    for (int k = 0; k < 2; ++k) {
+      model.row_lower.push_back(-kInf);
+      model.row_upper.push_back(0.0);
+    }
+    for (const double v : {kDemand / 2, kDemand / 2, 0.0, kDemand / 2 / kBigM, 0.0}) {
+      x.push_back(v);
+    }
+  }
+  model.A = samaya::SparseMatrix::from_triplets(3 * kCopies, 5 * kCopies, std::move(t));
+  const samaya::SparseMatrix at = model.A.transpose();
+  const samaya::CutContext ctx{model, at, model.col_lower, model.col_upper, x, 3 * kCopies};
+  std::vector<char> covered(static_cast<std::size_t>(kCopies), 0);
+  Index next = 0;
+  for (int round = 0; round < 10; ++round) {
+    std::vector<samaya::Cut> cuts;
+    next = samaya::separate_aggregated_mir(ctx, cuts, next);
+    for (const samaya::Cut& c : cuts) {
+      for (const Index j : c.index) covered[static_cast<std::size_t>(j / 5)] = 1;
+    }
+  }
+  const auto count = std::count(covered.begin(), covered.end(), char{1});
+  std::printf("  %d copies, %ld with a cut after 10 rounds\n", kCopies, static_cast<long>(count));
+  CHECK_EQ(count, kCopies);
+}
+
+TEST(mip_clique_separator_merges_edges_into_a_triangle) {
+  // Edge rows x0 + x1 <= 1, x1 + x2 <= 1, x0 + x2 <= 1 and x2 + x3 <= 1. At x = 1/2 every row
+  // holds with equality; only the triangle merged from three rows, x0 + x1 + x2 <= 1, is violated
+  // (by 1/2). x3 conflicts with x2 alone, so it must stay out of that clique.
+  Model model;
+  for (int j = 0; j < 4; ++j) {
+    model.obj.push_back(1.0);
+    model.col_lower.push_back(0);
+    model.col_upper.push_back(1);
+    model.col_type.push_back(samaya::VarType::kInteger);
+  }
+  const int edges[4][2] = {{0, 1}, {1, 2}, {0, 2}, {2, 3}};
+  std::vector<samaya::Triplet> t;
+  for (Index e = 0; e < 4; ++e) {
+    t.push_back({e, edges[e][0], 1.0});
+    t.push_back({e, edges[e][1], 1.0});
+    model.row_lower.push_back(-kInf);
+    model.row_upper.push_back(1.0);
+  }
+  model.A = samaya::SparseMatrix::from_triplets(4, 4, std::move(t));
+  const samaya::SparseMatrix at = model.A.transpose();
+  const std::vector<double> x = {0.5, 0.5, 0.5, 0.5};
+  const samaya::CutContext ctx{model, at, model.col_lower, model.col_upper, x, 4};
+  std::vector<samaya::Cut> cuts;
+  samaya::separate_cliques(ctx, cuts);
+  bool triangle = false;
+  int invalid = 0;
+  for (const samaya::Cut& c : cuts) {
+    // Every cut must hold at every independent set of the graph.
+    for (int set = 0; set < 16; ++set) {
+      bool independent = true;
+      for (const auto& e : edges) independent &= !((set >> e[0] & 1) && (set >> e[1] & 1));
+      if (!independent) continue;
+      double activity = 0.0;
+      for (std::size_t k = 0; k < c.index.size(); ++k) {
+        activity += c.value[k] * (set >> c.index[k] & 1);
+      }
+      if (activity < c.lower - 1e-9) ++invalid;
+    }
+    std::vector<Index> cols = c.index;
+    std::sort(cols.begin(), cols.end());
+    if (cols == std::vector<Index>{0, 1, 2}) triangle = true;
+  }
+  std::printf("  %zu cuts, triangle found: %s, %d invalid\n", cuts.size(), triangle ? "yes" : "no",
+              invalid);
+  CHECK_EQ(invalid, 0);
+  CHECK(triangle);
+}
+
+TEST(mip_clique_cuts_are_valid_and_close_independent_set_gaps) {
+  // Two families, every cut checked against the reference optimum:
+  // - maximum weight independent sets in the edge formulation (x_u + x_v <= 1 per edge): every
+  //   clique larger than an edge must be merged from several rows, and those cliques close most of
+  //   the root gap;
+  // - knapsack rows over binaries with small integer weights (some pairs fill a row exactly and
+  //   do not conflict) plus implication rows x_a - x_b <= 0 (complemented literals).
+  const samaya::Logger quiet(0);
+  std::mt19937 rng(95);
+  const auto uniform_int = [&](int lo, int hi) {
+    return std::uniform_int_distribution<int>(lo, hi)(rng);
+  };
+  long long violations = 0;
+  int graphs = 0;
+  int knapsacks = 0;
+  int gaps = 0;
+  double closed = 0.0;
+  for (int k = 0; k < 120; ++k) {
+    Model model;
+    model.sense = samaya::ObjSense::kMaximize;
+    std::vector<samaya::Triplet> t;
+    Index row = 0;
+    const bool graph = k % 2 == 0;
+    const int n = graph ? uniform_int(10, 16) : uniform_int(10, 14);
+    for (int j = 0; j < n; ++j) {
+      model.obj.push_back(uniform_int(1, 9));
+      model.col_lower.push_back(0);
+      model.col_upper.push_back(1);
+      model.col_type.push_back(samaya::VarType::kInteger);
+    }
+    if (graph) {
+      for (int u = 0; u < n; ++u) {
+        for (int v = u + 1; v < n; ++v) {
+          if (uniform_int(0, 99) >= 35) continue;
+          t.push_back({row, u, 1.0});
+          t.push_back({row, v, 1.0});
+          model.row_lower.push_back(-kInf);
+          model.row_upper.push_back(1.0);
+          ++row;
+        }
+      }
+    } else {
+      const int rows = uniform_int(2, 3);
+      for (int r = 0; r < rows; ++r, ++row) {
+        for (int j = 0; j < n; ++j) t.push_back({row, j, static_cast<double>(uniform_int(1, 10))});
+        model.row_lower.push_back(-kInf);
+        model.row_upper.push_back(uniform_int(8, 14));
+      }
+      for (int r = 0; r < 3; ++r, ++row) {  // x_a <= x_b.
+        const int a = uniform_int(0, n - 1);
+        const int b = (a + uniform_int(1, n - 1)) % n;
+        t.push_back({row, a, 1.0});
+        t.push_back({row, b, -1.0});
+        model.row_lower.push_back(-kInf);
+        model.row_upper.push_back(0.0);
+      }
+    }
+    if (row == 0) continue;
+    model.A = samaya::SparseMatrix::from_triplets(row, n, std::move(t));
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    options.probing = false;
+    options.restart = false;
+    options.heuristics = false;
+    options.debug_solution = ref.x;
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    violations += out.debug_cut_violations;
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+    if (graph) {
+      ++graphs;
+      // Maximization: the root bounds are upper bounds.
+      const double gap = out.root_bound - ref.objective;
+      if (gap > 1e-6) {
+        ++gaps;
+        closed += (out.root_bound - out.root_bound_cuts) / gap;
+      }
+    } else {
+      ++knapsacks;
+    }
+  }
+  const double average = gaps > 0 ? closed / gaps : 0.0;
+  std::printf("  %d independent-set graphs (%.0f%% of the root gap closed on average), %d "
+              "conflict knapsacks, %lld violations\n",
+              graphs, 100.0 * average, knapsacks, violations);
+  CHECK_EQ(violations, 0);
+  CHECK(graphs > 50);
+  CHECK(knapsacks > 40);
+  CHECK(gaps > 20);
+}
+
 TEST(mip_flow_cover_separates_single_node_big_m) {
   // One demand node: x1 + x2 + x3 = d, x_a <= M y_a with M >> d. The LP point sends d on arc 1
   // with y1 = d / M. The separator must cut it off (e.g. y1 + y2 + y3 >= 1), and every cut must

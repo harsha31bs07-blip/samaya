@@ -299,6 +299,8 @@ class BranchAndBound {
   // their LP point violates.
   std::vector<Cut> cut_pool_;
   std::vector<Conflict> conflicts_;
+  // Where the next aggregated c-MIR round starts taking start rows (they rotate between rounds).
+  Index aggregation_start_ = 0;
   double tree_cut_seconds_ = 0.0;
   // Tree cut rounds so far, and those whose cuts stayed in the LP.
   long long tree_cut_rounds_ = 0;

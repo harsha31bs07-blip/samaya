@@ -629,8 +629,9 @@ int BranchAndBound::separate_and_add_cuts(bool tree, bool fresh, int tree_max_cu
   if (!tree) separate_gomory(ctx, candidates);
   if (fresh) {
     separate_mir(ctx, candidates);
-    separate_aggregated_mir(ctx, candidates);
+    aggregation_start_ = separate_aggregated_mir(ctx, candidates, aggregation_start_);
     separate_knapsack_covers(ctx, candidates);
+    separate_cliques(ctx, candidates);
   }
 
   // Select the most efficacious cuts, skipping near-parallel ones.
