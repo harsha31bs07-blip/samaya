@@ -27,11 +27,20 @@ constexpr std::size_t kMaxConflicts = 1000;
 constexpr double kConflictDropTol = 1e-9;
 // Relative safety margin on each side, for the round-off of the aggregation.
 constexpr double kConflictSafety = 1e-9;
-// Farkas ray entries up to this share of the largest are round-off (a row whose logical is basic
-// has 0 in theory) and are zeroed, as lp_solver.cpp does for LP certificates.
-constexpr double kRayDropTol = 1e-12;
+// Farkas ray or dual entries up to this share of the largest are round-off (a row whose logical
+// is basic has 0 in theory) and are zeroed, as lp_solver.cpp does for LP certificates.
+constexpr double kMultiplierDropTol = 1e-12;
+// With an integral objective an improving solution's objective is an integer below the cutoff;
+// this slack matches effective_bound's rounding.
+constexpr double kIntegralObjectiveSlack = 1e-6;
 
 }  // namespace
+
+double BranchAndBound::conflict_limit() const {
+  const double limit = cutoff();
+  if (!integral_objective_ || !(limit < kInf)) return limit;
+  return offset_ + std::ceil(limit - offset_) - 1.0 + kIntegralObjectiveSlack;
+}
 
 bool BranchAndBound::add_conflict(const std::vector<double>& g, double lower, double upper,
                                   bool relative) {
@@ -49,14 +58,21 @@ bool BranchAndBound::add_conflict(const std::vector<double>& g, double lower, do
     const double a = g[j];
     if (a == 0.0) continue;
     if (std::fabs(a) < kConflictDropTol * largest) {
-      // Relax both sides by the column's contribution over its global bounds.
+      // Relax each finite side by the column's contribution over its global bounds. A side needs
+      // only the bound that limits it: lower <= g'x loses the largest a x_j, g'x <= upper the
+      // smallest.
       const double lo = root_lower_[j];
       const double up = root_upper_[j];
-      if (!std::isfinite(lo) || !std::isfinite(up)) return false;
-      const double min_term = std::min(a * lo, a * up);
-      const double max_term = std::max(a * lo, a * up);
-      if (c.lower > -kInf) c.lower -= max_term;
-      if (c.upper < kInf) c.upper -= min_term;
+      if (c.lower > -kInf) {
+        const double max_term = a > 0.0 ? a * up : a * lo;
+        if (!std::isfinite(max_term)) return false;
+        c.lower -= max_term;
+      }
+      if (c.upper < kInf) {
+        const double min_term = a > 0.0 ? a * lo : a * up;
+        if (!std::isfinite(min_term)) return false;
+        c.upper -= min_term;
+      }
       continue;
     }
     c.index.push_back(j);
@@ -80,7 +96,7 @@ bool BranchAndBound::add_conflict(const std::vector<double>& g, double lower, do
     if (!relative || debug_value < cutoff()) {
       double activity = 0.0;
       for (std::size_t k = 0; k < c.index.size(); ++k) activity += c.value[k] * d[c.index[k]];
-      const double upper_now = relative ? c.upper + cutoff() : c.upper;
+      const double upper_now = relative ? c.upper + conflict_limit() : c.upper;
       const double tol = 1e-6 * (1.0 + std::fabs(activity));
       if (activity < c.lower - tol || activity > upper_now + tol) {
         ++outcome_.debug_conflict_violations;
@@ -121,7 +137,7 @@ void BranchAndBound::analyze_infeasible_lp() {
   double min_ys = 0.0;
   double max_ys = 0.0;
   for (Index i = 0; i < m_; ++i) {
-    if (std::fabs(ray[i]) <= kRayDropTol * ray_max) continue;
+    if (std::fabs(ray[i]) <= kMultiplierDropTol * ray_max) continue;
     y[i] = ray[i] * scaling_.row[i];
     if (y[i] == 0.0) continue;
     const double lo = y[i] > 0.0 ? model_.row_lower[i] : model_.row_upper[i];
@@ -159,24 +175,37 @@ void BranchAndBound::analyze_infeasible_lp() {
 void BranchAndBound::analyze_cutoff_lp() {
   if (!(cutoff() < kInf)) return;
   const std::vector<double>& dual = simplex_->duals();
-  std::vector<double> y(static_cast<std::size_t>(m_));
+  // Round-off duals are zeroed as the ray's entries are: any multipliers give a valid proof.
+  double dual_max = 0.0;
+  for (Index i = 0; i < m_; ++i) dual_max = std::max(dual_max, std::fabs(dual[i]));
+  std::vector<double> y(static_cast<std::size_t>(m_), 0.0);
   double min_ys = 0.0;
   for (Index i = 0; i < m_; ++i) {
+    if (std::fabs(dual[i]) <= kMultiplierDropTol * dual_max) continue;
     y[i] = dual[i] * scaling_.row[i];
     if (y[i] == 0.0) continue;
     min_ys += y[i] * (y[i] > 0.0 ? model_.row_lower[i] : model_.row_upper[i]);
   }
   if (!std::isfinite(min_ys)) return;
-  // d = c - A'y; improving solutions satisfy  d'x <= cutoff + (offset - min y's).
+  // d = c - A'y; improving solutions satisfy  d'x <= limit - offset - min y's.
   std::vector<double> d(static_cast<std::size_t>(n_), 0.0);
   model_.A.multiply_transpose(y, d);
   for (Index j = 0; j < n_; ++j) d[j] = cost_[j] - d[j];
-  add_conflict(d, -kInf, -offset_ - min_ys, true);
+  // Keep the proof only if it excludes the LP it came from. One that does not rarely prunes
+  // elsewhere, yet every node would pass over it.
+  double min_act = 0.0;
+  for (Index j = 0; j < n_; ++j) {
+    if (d[j] == 0.0) continue;
+    min_act += d[j] > 0.0 ? d[j] * lower_[j] : d[j] * upper_[j];
+  }
+  const double rhs = -offset_ - min_ys;
+  if (!(min_act > rhs + conflict_limit())) return;
+  add_conflict(d, -kInf, rhs, true);
 }
 
 bool BranchAndBound::propagate_conflicts(std::vector<BoundChange>* record) {
   std::vector<Index> changed;
-  const double limit = cutoff();
+  const double limit = conflict_limit();
   for (Conflict& c : conflicts_) {
     const double rl = c.lower;
     double ru = c.upper;

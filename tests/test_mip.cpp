@@ -846,6 +846,108 @@ TEST(mip_farkas_rays_prove_their_nodes_infeasible) {
   CHECK(prunes > 20);
 }
 
+TEST(mip_conflicts_from_strong_branching_children_hold) {
+  // Lot sizing again, now with strong branching: a child it proves infeasible or cut off yields a
+  // proof too, and each Farkas ray is checked on that child's bounds (the strong-branched column
+  // is still tightened when the ray is analyzed).
+  const samaya::Logger quiet(0);
+  constexpr int kModels = 60;
+  long long violations = 0;
+  long long found = 0;
+  long long from_strong_branching = 0;
+  long long prunes = 0;
+  long long infeasible_lps = 0;
+  long long farkas = 0;
+  long long farkas_failures = 0;
+  int models = 0;
+  std::mt19937 rng(173);
+  for (int k = 0; k < kModels; ++k) {
+    Model model = lot_sizing(rng);
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    REQUIRE(ref.status == ReferenceMilpResult::Status::kOptimal);
+    scale_rows_randomly(model, rng);
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    options.probing = false;
+    options.restart = false;
+    options.cuts = false;
+    options.heuristics = false;
+    options.conflict_density = 1.0;
+    options.debug_solution = ref.x;
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    ++models;
+    violations += out.debug_conflict_violations;
+    found += out.conflicts_found;
+    from_strong_branching += out.strong_branching_conflicts;
+    prunes += out.conflict_prunes;
+    infeasible_lps += out.conflict_infeasible_lps;
+    farkas += out.farkas_proofs;
+    farkas_failures += out.debug_farkas_failures;
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+  }
+  std::printf("  %d lot-sizing models: %lld proofs stored (%lld from strong branching, %lld from "
+              "%lld infeasible LPs), %lld nodes pruned by them, %lld violations, %lld rays "
+              "rejected\n",
+              models, found, from_strong_branching, farkas, infeasible_lps, prunes, violations,
+              farkas_failures);
+  CHECK_EQ(models, kModels);
+  CHECK_EQ(violations, 0);
+  CHECK_EQ(farkas_failures, 0);
+  // Floors against a vacuous run, about a third of the counts at this seed (387 proofs from
+  // strong branching, 269 Farkas proofs).
+  CHECK(from_strong_branching > 120);
+  CHECK(farkas > 80);
+}
+
+TEST(mip_conflicts_with_an_integral_objective_hold) {
+  // Multi-dimensional knapsacks with integer values: an improving solution's objective is then an
+  // integer below the cutoff, and cut-off proofs are stated against that integer. They must
+  // still never exclude an improving optimum.
+  const samaya::Logger quiet(0);
+  constexpr int kModels = 40;
+  long long violations = 0;
+  long long found = 0;
+  long long cutoff_proofs = 0;
+  long long prunes = 0;
+  int models = 0;
+  std::mt19937 rng(174);
+  for (int k = 0; k < kModels; ++k) {
+    Model model = multi_knapsack(rng);
+    for (double& c : model.obj) c = std::round(c);
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    REQUIRE(ref.status == ReferenceMilpResult::Status::kOptimal);
+    scale_rows_randomly(model, rng);
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    options.probing = false;
+    options.restart = false;
+    options.cuts = false;
+    options.heuristics = false;
+    options.conflict_density = 1.0;
+    options.debug_solution = ref.x;
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    ++models;
+    violations += out.debug_conflict_violations;
+    found += out.conflicts_found;
+    cutoff_proofs += out.conflicts_found - out.farkas_proofs;
+    prunes += out.conflict_prunes;
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+  }
+  std::printf("  %d knapsacks with integer values: %lld proofs stored (%lld cut-off proofs), %lld "
+              "nodes pruned by them, %lld violations\n",
+              models, found, cutoff_proofs, prunes, violations);
+  CHECK_EQ(models, kModels);
+  CHECK_EQ(violations, 0);
+  // Floors against a vacuous run, about a third of the counts at this seed (539 cut-off proofs,
+  // 2062 prunes).
+  CHECK(cutoff_proofs > 170);
+  CHECK(prunes > 680);
+}
+
 TEST(mip_parallel_search_matches_reference) {
   // Four threads from the first node (no sequential ramp-up) on the random families: the
   // parallel search must reach the same optimum and status as the reference.

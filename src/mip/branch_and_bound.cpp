@@ -881,6 +881,18 @@ Index BranchAndBound::select_branching(const std::vector<Index>& fractional,
   Index best = -1;
   double best_score = -1.0;
   int strong = 0;
+  // A strong-branching child found infeasible or cut off yields a proof just as a node LP does:
+  // its bounds are still set, and the proof itself holds everywhere.
+  const auto learn_from_child = [&](bool infeasible) {
+    if (!options_.conflicts) return;
+    const long long before = outcome_.conflicts_found;
+    if (infeasible) {
+      analyze_infeasible_lp();
+    } else {
+      analyze_cutoff_lp();
+    }
+    outcome_.strong_branching_conflicts += outcome_.conflicts_found - before;
+  };
   for (const Candidate& c : candidates) {
     const Index j = c.col;
     double score = c.score;
@@ -905,6 +917,7 @@ Index BranchAndBound::select_branching(const std::vector<Index>& fractional,
         const double distance = d == 0 ? x[j] - down_value : up_value - x[j];
         if (st == SimplexStatus::kInfeasible) {
           cut[d] = true;
+          learn_from_child(true);
         } else if (st == SimplexStatus::kOptimal || st == SimplexStatus::kIterationLimit) {
           const double child = relaxation_objective();
           gain[d] = std::max(0.0, child - objective);
@@ -912,7 +925,10 @@ Index BranchAndBound::select_branching(const std::vector<Index>& fractional,
           // exists, such columns never become reliable and are strong-branched at every node
           // (mas76: 25k strong-branching LPs instead of 1.5k).
           record_pseudocost(j, d == 1, gain[d], distance);
-          if (st == SimplexStatus::kOptimal && effective_bound(child) >= cutoff()) cut[d] = true;
+          if (st == SimplexStatus::kOptimal && effective_bound(child) >= cutoff()) {
+            cut[d] = true;
+            learn_from_child(false);
+          }
         } else {
           gain[d] = pseudocost(j, d == 1) * distance;
         }
@@ -1214,6 +1230,11 @@ MipOutcome BranchAndBound::restart() {
     outcome_.heuristic_solutions += out.heuristic_solutions;
     outcome_.heuristic_lp_iterations += out.heuristic_lp_iterations;
     outcome_.reduced_cost_fixings += out.reduced_cost_fixings;
+    outcome_.conflicts_found += out.conflicts_found;
+    outcome_.conflict_prunes += out.conflict_prunes;
+    outcome_.conflict_infeasible_lps += out.conflict_infeasible_lps;
+    outcome_.farkas_proofs += out.farkas_proofs;
+    outcome_.strong_branching_conflicts += out.strong_branching_conflicts;
     outcome_.threads_used = out.threads_used;
   }
   outcome_.restarted = true;
@@ -1411,10 +1432,10 @@ MipOutcome BranchAndBound::solve() {
 
   if (outcome_.conflicts_found > 0) {
     log_.log(1,
-             "MIP conflicts: %lld proofs stored (%lld from %lld infeasible LPs), %lld nodes "
-             "pruned by them",
+             "MIP conflicts: %lld proofs stored (%lld from %lld infeasible LPs, %lld from "
+             "strong branching), %lld nodes pruned by them",
              outcome_.conflicts_found, outcome_.farkas_proofs, outcome_.conflict_infeasible_lps,
-             outcome_.conflict_prunes);
+             outcome_.strong_branching_conflicts, outcome_.conflict_prunes);
   }
   if (tree_cut_rounds_ > 0) {
     log_.log(1, "MIP tree cuts: %d kept from %lld of %lld rounds, %zu left in the pool, %.2f s",

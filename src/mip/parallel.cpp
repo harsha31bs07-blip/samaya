@@ -62,6 +62,9 @@ void BranchAndBound::adopt(const BranchAndBound& master, int id) {
   }
   incumbent_value_ = master.incumbent_value_;
   incumbent_ = master.incumbent_;
+  // The master's proofs hold for every worker: they use only the rows and the root bounds.
+  conflicts_ = master.conflicts_;
+  for (Conflict& c : conflicts_) c.last_used = 0;
   rng_.seed(12345u + static_cast<unsigned>(id));
   next_dive_rule_ = id;  // Workers start with different diving rules.
 }
@@ -288,6 +291,11 @@ void BranchAndBound::run_parallel(bool& unbounded, bool& stopped, bool& gap_clos
     outcome_.heuristic_solutions += worker->outcome_.heuristic_solutions;
     outcome_.heuristic_lp_iterations += worker->outcome_.heuristic_lp_iterations;
     outcome_.reduced_cost_fixings += worker->outcome_.reduced_cost_fixings;
+    outcome_.conflicts_found += worker->outcome_.conflicts_found;
+    outcome_.conflict_prunes += worker->outcome_.conflict_prunes;
+    outcome_.conflict_infeasible_lps += worker->outcome_.conflict_infeasible_lps;
+    outcome_.farkas_proofs += worker->outcome_.farkas_proofs;
+    outcome_.strong_branching_conflicts += worker->outcome_.strong_branching_conflicts;
     pruned_bound_ = std::min(pruned_bound_, worker->pruned_bound_);
     incomplete_ = incomplete_ || worker->incomplete_;
   }

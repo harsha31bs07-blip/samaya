@@ -75,8 +75,8 @@ struct MipOptions {
   std::optional<double> objective_cutoff;
   // Tests: a known feasible (e.g. optimal) solution. Every cut is checked against it and a cut
   // that separates it is counted in MipOutcome::debug_cut_violations. Setting it also checks the
-  // Farkas ray of every infeasible node LP, kept as a proof or not, with verify_infeasibility; a
-  // missing ray counts too (debug_farkas_failures).
+  // Farkas ray of every analyzed infeasible LP (node or strong-branching child), kept as a proof
+  // or not, with verify_infeasibility; a missing ray counts too (debug_farkas_failures).
   std::vector<double> debug_solution;
 };
 
@@ -104,11 +104,13 @@ struct MipOutcome {
   long long tree_cuts_separated = 0;  // Tree cuts appended, including those removed again.
   long long conflicts_found = 0;      // Proofs kept in the conflict pool.
   long long conflict_prunes = 0;      // Nodes pruned by a stored proof before their LP.
-  long long conflict_infeasible_lps = 0;  // Infeasible node LPs whose Farkas ray was analyzed.
-  long long farkas_proofs = 0;            // Of conflicts_found: proofs from Farkas rays.
+  // Infeasible node and strong-branching LPs whose Farkas ray was analyzed.
+  long long conflict_infeasible_lps = 0;
+  long long farkas_proofs = 0;               // Of conflicts_found: proofs from Farkas rays.
+  long long strong_branching_conflicts = 0;  // Of conflicts_found: from strong-branching LPs.
   long long debug_conflict_violations = 0;  // Proofs that exclude debug_solution (must be 0).
-  // Farkas rays of infeasible node LPs (kept as a proof or not) that, mapped to the original rows,
-  // verify_infeasibility rejects on their node's bounds, or missing rays (must be 0; checked only
+  // Farkas rays of infeasible LPs (kept as a proof or not) that, mapped to the original rows,
+  // verify_infeasibility rejects on their LP's bounds, or missing rays (must be 0; checked only
   // with debug_solution).
   long long debug_farkas_failures = 0;
   double root_bound = -kInf;      // Root LP bound before and after cuts, in the model's sense.
@@ -229,6 +231,9 @@ class BranchAndBound {
   // returns whether it was kept.
   bool add_conflict(const std::vector<double>& g, double lower, double upper, bool relative);
   bool propagate_conflicts(std::vector<BoundChange>* record);
+  // The largest objective an improving solution can have: the cutoff, or with an integral
+  // objective the integer value below it (the limit effective_bound prunes by).
+  double conflict_limit() const;
 
   // Search.
   NodeResult process_node(Node& node, std::vector<Node>& children);

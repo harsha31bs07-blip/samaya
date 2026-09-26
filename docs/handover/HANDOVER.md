@@ -63,6 +63,11 @@ Recent MILP work, each item with tests and planted-bug checks (details in `docs/
     the verifier; such a bug can only lose proofs, never make a wrong one), a Farkas proof put
     on the wrong side (181 violations), a sign flip in the cut-off proof (violations and wrong
     optima in both tests).
+  - Strong-branching children proven infeasible or cut off give proofs too. With an integral
+    objective, cut-off proofs are stated against the integer below the cutoff (the limit
+    `effective_bound` prunes by), and a cut-off proof is kept only if it excludes the LP it came
+    from. Bound A/B against conflict analysis alone: neutral (solved 8 -> 9, within the +-1 noise
+    of two runs of one binary; bound better on 11, worse on 15; mean distance 22.25% both).
   - Bound A/B, 60 s (both builds at the same time): solved 7 -> 9 (neos17, nu25-pr12); bound
     better on 11 instances, worse on 9; mean distance from the optimum 22.44% -> 22.29%, median
     8.34% -> 7.65%. Largest gains neos17 (solved), timtab1 36.5% -> 34.1%, neos-911970 8.4% ->
@@ -70,12 +75,9 @@ Recent MILP work, each item with tests and planted-bug checks (details in `docs/
 
 ## Next tasks, in the order agreed
 
-1. **Proofs from infeasible strong-branching children** (`select_branching`, the kInfeasible
-   case): the ray is fresh there and `lower_`/`upper_` hold the child's bounds until they are
-   restored. Needs its own test with strong branching on. Two known limits of the current
-   proofs: a round-off coefficient on a column with an infinite bound loses a Farkas proof, and
-   `add_conflict` gives up when either global bound is infinite although a one-sided proof
-   needs only one. Parallel search does not add the workers' conflict counters to the outcome.
+1. **Conflict analysis, remaining limit:** a round-off coefficient on a column with an infinite
+   bound loses a Farkas proof (the proof cannot be relaxed validly there). Strong-branching
+   proofs are in (A/B neutral); their pool pass costs every node, so watch it on large models.
 2. **Clique table and implied-bound cuts** for the weak big-M bounds (p200x1188c, mc11).
 3. **Symmetry** (fhnw-binpack4-4, graph20-20-1rand): orbital fixing on a simple detector.
    Only if time allows.

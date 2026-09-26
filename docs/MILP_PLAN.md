@@ -127,6 +127,10 @@ above, which ignores such instances.
   - Bound A/B, 60 s: solved 7 -> 9 (neos17, nu25-pr12); bound better on 11, worse on 9; mean
     distance from the optimum 22.44% -> 22.29%, median 8.34% -> 7.65%. Largest loss enlight_hard
     16.2% -> 18.9%.
+  - Then proofs from strong-branching children (as SCIP's conflict/usesb), cut-off proofs against
+    the integer below the cutoff for integral objectives, and only cut-off proofs that exclude
+    their own LP. Bound A/B against the above: neutral (solved 8 -> 9, bound better on 11, worse
+    on 15, mean distance unchanged at 22.25%).
 
 **Next, from the per-instance analysis** ([results/comparison.md](results/comparison.md)):
 - neos-3381206-awhea now has a solution (Feasibility Jump) but its bound is stuck at 416 with no
