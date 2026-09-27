@@ -43,6 +43,17 @@ constexpr double kBasisMemoryBudget = 256.0 * 1024 * 1024;
 constexpr int kMaxTightenRounds = 5;
 // Propagation stops after this many row visits per call and ignores huge derived bounds.
 constexpr double kMaxDerivedBound = 1e12;
+// A derived bound on a continuous column is applied only if it moves the bound by this fraction
+// of min(domain width, |bound|), at least kMinContinuousStep, or moves it across zero (SCIP's
+// SCIPsetIsLbBetter with numerics/boundstreps = 0.05): without it, rows that chain continuous
+// columns shrink their domains by ever smaller steps until the budget runs out.
+constexpr double kContinuousBoundStep = 0.05;
+constexpr double kMinContinuousStep = 1e-3;
+// Relative round-off of a row's activity sum, relaxing continuous bounds derived from it.
+constexpr double kActivityRoundoff = 1e-12;
+// Tests: debug_solution is inside a box if within this relative distance of its bounds (the
+// reference solutions satisfy the rows to about 1e-9).
+constexpr double kDebugBoxTolerance = 1e-7;
 // Cut selection and the root cut loop.
 constexpr double kMinCutEfficacy = 1e-5;
 constexpr double kMaxCutParallelism = 0.995;
@@ -294,7 +305,41 @@ bool BranchAndBound::is_fractional(double v) const {
 // ---------------------------------------------------------------------------------------------
 // Propagation
 
+namespace {
+
+// Whether a derived bound on a continuous column is worth applying (kContinuousBoundStep).
+bool improves_lower(double new_lower, double lower, double upper) {
+  if (!(new_lower > lower)) return false;
+  if (!std::isfinite(lower) || (lower < 0.0 && new_lower >= 0.0)) return true;
+  const double scale = std::max(std::min(upper - lower, std::fabs(lower)), kMinContinuousStep);
+  return new_lower > lower + kContinuousBoundStep * scale;
+}
+
+bool improves_upper(double new_upper, double lower, double upper) {
+  return improves_lower(-new_upper, -upper, -lower);
+}
+
+}  // namespace
+
 bool BranchAndBound::propagate(std::vector<Index> changed, std::vector<BoundChange>* record) {
+  // Tests: whether debug_solution lies in the current box, which propagation must keep.
+  const bool debug = !options_.debug_solution.empty() && contains_debug_solution();
+  const bool feasible = propagate_rows(std::move(changed), record);
+  if (debug && (!feasible || !contains_debug_solution())) ++outcome_.debug_propagation_violations;
+  return feasible;
+}
+
+bool BranchAndBound::contains_debug_solution() const {
+  const std::vector<double>& d = options_.debug_solution;
+  for (Index j = 0; j < n_; ++j) {
+    const double tol = kDebugBoxTolerance * (1.0 + std::fabs(d[j]));
+    if (d[j] < lower_[j] - tol || d[j] > upper_[j] + tol) return false;
+  }
+  return true;
+}
+
+bool BranchAndBound::propagate_rows(std::vector<Index> changed,
+                                    std::vector<BoundChange>* record) {
   const auto cstart = model_.A.col_start();
   const auto cindex = model_.A.row_index();
   const auto rstart = At_.col_start();
@@ -324,22 +369,23 @@ bool BranchAndBound::propagate(std::vector<Index> changed, std::vector<BoundChan
     double max_fin = 0.0;
     int min_inf = 0;
     int max_inf = 0;
-    double max_range = 0.0;  // Largest |a_j| (u_j - l_j) over the integer columns.
+    double max_range = 0.0;  // Largest |a_j| (u_j - l_j) over the columns.
+    double magnitude = 0.0;  // Sum of the finite |a_j l_j| and |a_j u_j|, for round-off.
     for (NnzIndex p = rstart[i]; p < rstart[i + 1]; ++p) {
       const Index j = rindex[p];
       const double a = rval[p];
       const double lo = a > 0.0 ? lower_[j] : upper_[j];
       const double up = a > 0.0 ? upper_[j] : lower_[j];
-      if (model_.col_type[j] == VarType::kInteger) {
-        max_range = std::max(max_range, std::fabs(a) * (upper_[j] - lower_[j]));
-      }
+      max_range = std::max(max_range, std::fabs(a) * (upper_[j] - lower_[j]));
       if (std::isfinite(lo)) {
         min_fin += a * lo;
+        magnitude += std::fabs(a * lo);
       } else {
         ++min_inf;
       }
       if (std::isfinite(up)) {
         max_fin += a * up;
+        magnitude += std::fabs(a * up);
       } else {
         ++max_inf;
       }
@@ -357,10 +403,18 @@ bool BranchAndBound::propagate(std::vector<Index> changed, std::vector<BoundChan
     if (upper_slack && lower_slack) continue;
     for (NnzIndex p = rstart[i]; p < rstart[i + 1]; ++p) {
       const Index j = rindex[p];
-      if (model_.col_type[j] != VarType::kInteger) continue;
+      const bool integer = model_.col_type[j] == VarType::kInteger;
+      if (!integer && !options_.propagate_continuous) continue;
       const double a = rval[p];
       double new_lo = lower_[j];
       double new_up = upper_[j];
+      // A continuous bound is relaxed by the bound tolerance, by the row tolerance an accepted
+      // solution may use (divided by |a|, as it moves x_j that much) and by the round-off of the
+      // activity sum, so that it never cuts off a solution the tolerances accept.
+      const auto slack = [&](double b, double row_tol) {
+        return options_.feasibility_tol * (1.0 + std::fabs(b)) +
+               (row_tol + kActivityRoundoff * magnitude) / std::fabs(a);
+      };
       // a x_j <= ru - (minimum activity of the other columns), and the same for rl.
       if (ru < kInf) {
         const double contrib = a > 0.0 ? a * lower_[j] : a * upper_[j];
@@ -372,11 +426,17 @@ bool BranchAndBound::propagate(std::vector<Index> changed, std::vector<BoundChan
         }
         const double b = (ru - residual) / a;
         if (std::isfinite(residual) && std::fabs(b) < kMaxDerivedBound) {
-          const double t = options_.integrality_tol * (1.0 + std::fabs(b));
-          if (a > 0.0) {
-            new_up = std::min(new_up, std::floor(b + t));
+          if (integer) {
+            const double t = options_.integrality_tol * (1.0 + std::fabs(b));
+            if (a > 0.0) {
+              new_up = std::min(new_up, std::floor(b + t));
+            } else {
+              new_lo = std::max(new_lo, std::ceil(b - t));
+            }
+          } else if (a > 0.0) {
+            new_up = std::min(new_up, b + slack(b, tol_u));
           } else {
-            new_lo = std::max(new_lo, std::ceil(b - t));
+            new_lo = std::max(new_lo, b - slack(b, tol_u));
           }
         }
       }
@@ -390,12 +450,25 @@ bool BranchAndBound::propagate(std::vector<Index> changed, std::vector<BoundChan
         }
         const double b = (rl - residual) / a;
         if (std::isfinite(residual) && std::fabs(b) < kMaxDerivedBound) {
-          const double t = options_.integrality_tol * (1.0 + std::fabs(b));
-          if (a > 0.0) {
-            new_lo = std::max(new_lo, std::ceil(b - t));
+          if (integer) {
+            const double t = options_.integrality_tol * (1.0 + std::fabs(b));
+            if (a > 0.0) {
+              new_lo = std::max(new_lo, std::ceil(b - t));
+            } else {
+              new_up = std::min(new_up, std::floor(b + t));
+            }
+          } else if (a > 0.0) {
+            new_lo = std::max(new_lo, b - slack(b, tol_l));
           } else {
-            new_up = std::min(new_up, std::floor(b + t));
+            new_up = std::min(new_up, b + slack(b, tol_l));
           }
+        }
+      }
+      if (!integer) {
+        if (!improves_lower(new_lo, lower_[j], upper_[j])) new_lo = lower_[j];
+        if (!improves_upper(new_up, lower_[j], upper_[j])) new_up = upper_[j];
+        if (new_lo <= new_up && (new_lo > lower_[j] || new_up < upper_[j])) {
+          ++outcome_.continuous_tightened;
         }
       }
       if (new_lo > new_up) {
@@ -1276,7 +1349,9 @@ MipOutcome BranchAndBound::solve() {
   if (options_.objective_cutoff) incumbent_value_ = sense_ * *options_.objective_cutoff;
 
   // Root propagation becomes part of the root bounds.
-  if (!propagate(integers_, nullptr)) {
+  std::vector<Index> all_columns(static_cast<std::size_t>(n_));
+  std::iota(all_columns.begin(), all_columns.end(), Index{0});
+  if (!propagate(std::move(all_columns), nullptr)) {
     outcome_.status = Status::kInfeasible;
     return outcome_;
   }

@@ -885,6 +885,8 @@ TEST(mip_farkas_rays_prove_their_nodes_infeasible) {
     options.cuts = false;
     options.heuristics = false;
     options.max_strong_branching = 0;
+    // Continuous propagation proves these nodes infeasible before their LP (0 rays otherwise).
+    options.propagate_continuous = false;
     options.conflict_density = 1.0;
     options.debug_solution = ref.x;
     const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
@@ -939,6 +941,8 @@ TEST(mip_conflicts_from_strong_branching_children_hold) {
     options.restart = false;
     options.cuts = false;
     options.heuristics = false;
+    // Continuous propagation proves these nodes infeasible before their LP (0 rays otherwise).
+    options.propagate_continuous = false;
     options.conflict_density = 1.0;
     options.debug_solution = ref.x;
     const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
@@ -1587,6 +1591,46 @@ TEST(mip_flow_cover_separates_single_node_big_m) {
               best_violation, invalid);
   CHECK_EQ(invalid, 0);
   CHECK(best_violation > 0.5);  // y1 + y2 + y3 >= 1 is violated by 1 - 7/1000.
+}
+
+TEST(mip_propagation_keeps_an_optimal_solution) {
+  // Propagation tightens continuous columns too (by large steps). Starting from any box that
+  // contains a known optimum, it must keep the optimum in the box and not declare the box
+  // infeasible; checked at every call (nodes, probing, dives) on families with many continuous
+  // columns and big-M rows, with the rows scaled by 1e-3..1e3.
+  const samaya::Logger quiet(0);
+  long long violations = 0;
+  long long tightened = 0;
+  int models = 0;
+  std::mt19937 rng(431);
+  for (int k = 0; k < 120; ++k) {
+    Model model;
+    std::vector<std::pair<int, int>> arcs;
+    switch (k % 4) {
+      case 0: model = fixed_charge(rng); break;
+      case 1: model = big_m_network(rng); break;
+      case 2: model = lot_sizing(rng); break;
+      default: model = random_milp(MilpFamily::kMixed, rng); break;
+    }
+    const ReferenceMilpResult ref = samaya::test::reference_milp(model);
+    if (ref.status != ReferenceMilpResult::Status::kOptimal) continue;
+    scale_rows_randomly(model, rng);
+    samaya::MipOptions options;
+    options.rel_gap = 0.0;
+    options.abs_gap = 1e-9;
+    options.debug_solution = ref.x;
+    const samaya::MipOutcome out = samaya::BranchAndBound(model, options, quiet).solve();
+    ++models;
+    violations += out.debug_propagation_violations;
+    tightened += out.continuous_tightened;
+    CHECK(out.status == Status::kOptimal);
+    CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
+  }
+  std::printf("  %d models, %lld continuous bounds tightened, %lld violations\n", models,
+              tightened, violations);
+  CHECK_EQ(violations, 0);
+  CHECK(models > 80);
+  CHECK(tightened > 500);
 }
 
 TEST(mip_restart_after_root_matches_reference) {

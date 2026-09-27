@@ -62,6 +62,9 @@ struct MipOptions {
   long long parallel_start_nodes = 200;
   // Root reductions for integer columns: coefficient tightening and probing on binaries.
   bool probing = true;
+  // Propagation also tightens continuous columns (by large steps; see propagate()). Tests of
+  // the Farkas proofs turn it off: it proves their infeasible nodes before the LP.
+  bool propagate_continuous = true;
   // Restart once after the root when it fixed a large share of the integer columns.
   bool restart = true;
   bool sub_mip_heuristics = true;
@@ -118,15 +121,20 @@ struct MipOutcome {
   long long debug_cut_violations = 0;
   // Root bounds or tightened rows that exclude debug_solution (must stay 0).
   long long debug_reduction_violations = 0;
+  long long continuous_tightened = 0;  // Continuous column bounds tightened by propagation.
+  // Propagation calls that started from a box containing debug_solution and excluded it or
+  // declared the box infeasible (must stay 0).
+  long long debug_propagation_violations = 0;
 };
 
 // LP-based branch-and-bound for mixed-integer linear programs.
 //
 // Node relaxations are solved by the dual simplex, warm-started from the parent's optimal basis,
 // on one scaled copy of the LP whose column bounds change from node to node. Each node first runs
-// bound propagation on the integer columns. Branching uses pseudocosts with reliability
-// initialization by strong branching (the product score); strong branching that proves a child
-// infeasible or cut off tightens the node instead. Nodes are selected by best bound, with plunging
+// bound propagation on the rows (integer columns by any integral step, continuous columns by
+// large steps only). Branching uses pseudocosts with reliability initialization by strong
+// branching (the product score); strong branching that proves a child infeasible or cut off
+// tightens the node instead. Nodes are selected by best bound, with plunging
 // (a depth-first dive into a child) while the dive stays promising. Heuristics: lock-based simple
 // rounding at every node, and rounding followed by an LP over the continuous columns at the root
 // and periodically. A candidate solution is accepted only if it satisfies the rows, bounds and
@@ -237,7 +245,11 @@ class BranchAndBound {
 
   // Search.
   NodeResult process_node(Node& node, std::vector<Node>& children);
+  // Tightens bounds from the rows of the changed columns, transitively; false if a row cannot be
+  // satisfied. With MipOptions::debug_solution it also counts debug_propagation_violations.
   bool propagate(std::vector<Index> changed, std::vector<BoundChange>* record);
+  bool propagate_rows(std::vector<Index> changed, std::vector<BoundChange>* record);
+  bool contains_debug_solution() const;
   void reduced_cost_fixing(Node& node, double objective, const std::vector<double>& reduced,
                            const std::vector<VarStatus>& basis);
   Index select_branching(const std::vector<Index>& fractional, const std::vector<double>& x,
