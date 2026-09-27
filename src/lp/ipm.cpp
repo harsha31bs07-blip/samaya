@@ -407,7 +407,11 @@ IpmResult solve_ipm(const Model& model, const IpmOptions& options, const Logger&
         if (has_l[j] && has_u[j]) {
           // A box: move inside by the shift, at most to the midpoint.
           const double margin = std::min(shift_p, 0.5 * (f.u[j] - f.l[j]));
-          z[j] = std::clamp(z[j], f.l[j] + margin, f.u[j] - margin);
+          const double inner_l = f.l[j] + margin;
+          // At the midpoint, rounding can put u - margin one ulp below l + margin, and std::clamp
+          // needs lo <= hi.
+          const double inner_u = std::max(inner_l, f.u[j] - margin);
+          z[j] = std::clamp(z[j], inner_l, inner_u);
         } else if (has_l[j]) {
           z[j] = std::max(z[j], f.l[j]) + shift_p;
         } else if (has_u[j]) {

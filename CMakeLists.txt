@@ -18,6 +18,7 @@ endif()
 
 option(SAMAYA_BUILD_TESTS "Build unit tests" ON)
 option(SAMAYA_BUILD_CLI "Build the samaya command-line tool" ON)
+option(SAMAYA_BUILD_STUDIO "Build samaya Studio, the Windows desktop app (WebView2)" ${WIN32})
 option(SAMAYA_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(SAMAYA_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 option(SAMAYA_CUDA "Enable CUDA kernels (PDLP, SpMV); lands in Phase 3" OFF)
@@ -43,11 +44,25 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
       "$<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address,undefined;-fno-omit-frame-pointer;-fno-sanitize-recover=all>")
     target_link_options(samaya_options INTERFACE -fsanitize=address,undefined)
   endif()
+  # Exact IEEE arithmetic: Xreal (src/core/xreal.hpp) needs a * b + c rounded twice, never fused
+  # into an FMA, or its error terms are wrong. Off everywhere, so builds with -march=native agree.
+  target_compile_options(samaya_options INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>")
 elseif(MSVC)
-  target_compile_options(samaya_options INTERFACE /W4 /permissive-)
+  # /fp:precise: no FMA contraction and no reassociation, as Xreal needs (see above).
+  target_compile_options(samaya_options INTERFACE
+    "$<$<COMPILE_LANGUAGE:CXX>:/W4;/permissive-;/utf-8;/fp:precise;/Zc:__cplusplus>")
   if(SAMAYA_WARNINGS_AS_ERRORS)
-    target_compile_options(samaya_options INTERFACE /WX)
+    target_compile_options(samaya_options INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:/WX>")
   endif()
+  if(SAMAYA_SANITIZE)
+    # MSVC has AddressSanitizer but no UBSan (UBSan runs in the Linux asan preset).
+    target_compile_options(samaya_options INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:/fsanitize=address;/Zi>")
+    target_link_options(samaya_options INTERFACE /INCREMENTAL:NO /DEBUG)
+    # The /RTC run-time checks cannot be combined with ASan.
+    string(REGEX REPLACE "/RTC[1csu]+" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+  endif()
+  # Windows gives a program 1 MB of stack (Linux 8 MB); std::thread workers inherit this size.
+  target_link_options(samaya_options INTERFACE /STACK:8388608)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -106,6 +121,9 @@ endif()
 
 if(SAMAYA_BUILD_CLI)
   add_subdirectory(apps/cli)
+  if(WIN32 AND SAMAYA_BUILD_STUDIO)
+    add_subdirectory(apps/studio)
+  endif()
 endif()
 
 if(SAMAYA_BUILD_TESTS)

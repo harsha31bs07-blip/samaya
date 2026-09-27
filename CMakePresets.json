@@ -35,18 +35,54 @@
       "inherits": "release",
       "displayName": "Release + CUDA",
       "cacheVariables": { "SAMAYA_CUDA": "ON", "CMAKE_CUDA_ARCHITECTURES": "86" }
+    },
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl",
+        "SAMAYA_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "windows-debug",
+      "inherits": "windows-base",
+      "displayName": "Windows (MSVC) Debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDebug" }
+    },
+    {
+      "name": "windows-release",
+      "inherits": "windows-base",
+      "displayName": "Windows (MSVC) Release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded" }
+    },
+    {
+      "name": "windows-asan",
+      "inherits": "windows-base",
+      "displayName": "Windows (MSVC) + ASan",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "SAMAYA_SANITIZE": "ON" }
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "asan", "configurePreset": "asan" },
-    { "name": "cuda", "configurePreset": "cuda" }
+    { "name": "cuda", "configurePreset": "cuda" },
+    { "name": "windows-debug", "configurePreset": "windows-debug" },
+    { "name": "windows-release", "configurePreset": "windows-release" },
+    { "name": "windows-asan", "configurePreset": "windows-asan" }
   ],
   "testPresets": [
     { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
     { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
     { "name": "asan", "configurePreset": "asan", "output": { "outputOnFailure": true } },
-    { "name": "cuda", "configurePreset": "cuda", "output": { "outputOnFailure": true } }
+    { "name": "cuda", "configurePreset": "cuda", "output": { "outputOnFailure": true } },
+    { "name": "windows-debug", "configurePreset": "windows-debug", "output": { "outputOnFailure": true } },
+    { "name": "windows-release", "configurePreset": "windows-release", "output": { "outputOnFailure": true } },
+    { "name": "windows-asan", "configurePreset": "windows-asan", "output": { "outputOnFailure": true } }
   ]
 }

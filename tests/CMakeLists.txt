@@ -13,10 +13,13 @@ add_executable(samaya_tests
   test_scaling.cpp
   test_sparse_matrix.cpp
   test_verify.cpp
+  test_xreal.cpp
+  test_studio_core.cpp
+  ${PROJECT_SOURCE_DIR}/apps/studio/studio_core.cpp
 )
 target_link_libraries(samaya_tests PRIVATE samaya::samaya samaya_options)
 # Tests exercise internal components (factorization, simplex) directly.
-target_include_directories(samaya_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_include_directories(samaya_tests PRIVATE ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/apps/studio)
 target_compile_definitions(samaya_tests PRIVATE
   SAMAYA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/instances")
 
@@ -41,7 +44,7 @@ if(SAMAYA_BUILD_CLI)
   # The run report (cases/report.py): both formats on a generated MRPL case.
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
-    add_test(NAME report_formats COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/report_smoke.sh
+    add_test(NAME report_formats COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/report_smoke.py
       $<TARGET_FILE:samaya_cli> ${PROJECT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/report_smoke)
     set_tests_properties(report_formats PROPERTIES PASS_REGULAR_EXPRESSION "report smoke test passed")
   endif()

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <memory>
 
+#include "core/xreal.hpp"
 #include "linalg/scaling.hpp"
 
 namespace samaya {
@@ -125,9 +126,9 @@ LpResult solve_lp(const Model& model, const LpSolveOptions& options, const Logge
   for (double& value : result.col_dual) value += 0.0;
   for (double& value : result.col_value) value += 0.0;
 
-  long double objective = model.obj_offset;
+  Xreal objective = model.obj_offset;  // double-double: the same bits on every platform
   for (Index j = 0; j < n; ++j) {
-    objective += static_cast<long double>(model.obj[j]) * result.col_value[j];
+    objective += Xreal(model.obj[j]) * result.col_value[j];
   }
   result.objective = static_cast<double>(objective);
 

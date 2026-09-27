@@ -17,7 +17,9 @@ namespace {
 
 SparseMatrix random_matrix(int m, int n, double density, std::mt19937& rng) {
   std::uniform_real_distribution<double> value(-1.0, 1.0);
-  std::bernoulli_distribution keep(density);
+  // Callers pass 3.0 / m, which exceeds 1 for tiny m; a probability above 1 is undefined (MSVC's
+  // debug library asserts). Capped, it means "keep every entry", as it did with libstdc++.
+  std::bernoulli_distribution keep(std::min(1.0, density));
   std::vector<Triplet> t;
   for (int j = 0; j < n; ++j) {
     t.push_back({static_cast<Index>(rng() % m), j, value(rng) + 2.0});

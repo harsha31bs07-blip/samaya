@@ -1,3 +1,5 @@
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 #include "samaya/io.hpp"
@@ -29,6 +31,24 @@ TEST(mps_reads_tiny_lp_file) {
 
 TEST(mps_missing_file_throws) {
   CHECK_THROWS(samaya::read_mps("/nonexistent/file.mps"), std::runtime_error);
+}
+
+TEST(mps_reads_utf8_path_with_spaces) {
+  // A file name with Devanagari and a space. The path is passed as UTF-8; on Windows it must be
+  // opened with the wide-character API (sources compile with /utf-8).
+  const std::string name = "samaya \u092E\u0949\u0921\u0932 test.mps";
+  const std::filesystem::path file = std::filesystem::temp_directory_path() /
+                                     std::filesystem::path(std::u8string(name.begin(), name.end()));
+  {
+    std::ofstream out(file);
+    out << "NAME UNI\nROWS\n N obj\n L c1\nCOLUMNS\n x obj 1 c1 1\n y obj 2 c1 1\nRHS\n rhs c1 4\n"
+           "ENDATA\n";
+  }
+  const std::u8string u8 = file.u8string();
+  const Model m = samaya::read_mps(std::string(u8.begin(), u8.end()));
+  CHECK_EQ(m.num_rows(), 1);
+  CHECK_EQ(m.num_cols(), 2);
+  std::filesystem::remove(file);
 }
 
 TEST(mps_row_types_ranges_and_offset) {

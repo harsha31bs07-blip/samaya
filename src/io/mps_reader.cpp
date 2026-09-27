@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <filesystem>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
@@ -460,7 +461,9 @@ Model read_mps_from_string(std::string_view text) {
 }
 
 Model read_mps(const std::string& path) {
-  std::ifstream in(path, std::ios::binary);
+  // The path is UTF-8; through std::filesystem::path MSVC opens it with the wide-character API.
+  const std::filesystem::path file(std::u8string(path.begin(), path.end()));
+  std::ifstream in(file, std::ios::binary);
   if (!in) throw std::runtime_error("cannot open '" + path + "'");
   std::ostringstream buffer;
   buffer << in.rdbuf();

@@ -22,7 +22,8 @@ class ParseError : public std::runtime_error {
 
 // Reads a model in (free or fixed) MPS format, including the QPS extensions QUADOBJ / QMATRIX.
 // Names may contain spaces only in fixed MPS, which is tried when free MPS fails. Throws
-// ParseError on malformed input and std::runtime_error if the file cannot be opened.
+// ParseError on malformed input and std::runtime_error if the file cannot be opened. The path is
+// UTF-8 on every platform (on Windows it is opened with the wide-character API).
 Model read_mps(const std::string& path);
 Model read_mps_from_string(std::string_view text);
 

@@ -51,6 +51,12 @@ ctest --preset release
 Presets: `debug` (warnings as errors), `release`, `asan` (AddressSanitizer + UBSan), `cuda`
 (reserved for the Phase 3 GPU kernels).
 
+**Windows (native, no WSL):** double-click `setup.bat`. It checks the PC (Visual Studio 2022
+Build Tools, Python, the WebView2 Runtime), installs what is missing after asking, builds with
+MSVC, runs the tests and installs **samaya Studio**, the desktop app: drag and drop models, see
+verified results, download them as Excel. Presets `windows-debug`, `windows-release` and
+`windows-asan`. Details and the release package: [docs/WINDOWS.md](docs/WINDOWS.md).
+
 ## Usage
 
 ```sh

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>samaya Studio</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<!-- Toolbar: the commands, as in a Windows desktop application. -->
+<header class="toolbar">
+  <div class="appname" id="home-btn" title="New case: choose a model and the settings">
+    <svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="32" r="28" fill="none" stroke="currentColor" stroke-width="5"/>
+      <polyline points="16,42 15,29 25,18 42,16" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round"/></svg>
+    samaya Studio
+  </div>
+  <div class="tb-sep"></div>
+  <button class="tb" id="tb-open" title="Open models (Ctrl+O)">
+    <svg viewBox="0 0 24 24"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5V18a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18z"/></svg>Open models…</button>
+  <button class="tb" id="tb-new" title="New case: choose a model and the settings">
+    <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New case</button>
+  <div class="tb-sep"></div>
+  <button class="tb" id="tb-rerun" title="Run this case again with other settings (Alt+Left)" disabled>
+    <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.6M4 4v5h5"/></svg>Run again…</button>
+  <button class="tb" id="tb-stop" title="Stop the running solve (Esc)" disabled>
+    <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>Stop</button>
+  <button class="tb" id="tb-compare" title="Compare the cases of this model side by side" disabled>
+    <svg viewBox="0 0 24 24"><path d="M4 5h6v14H4zM14 5h6v14h-6z"/></svg>Compare cases</button>
+  <div class="tb-fill"></div>
+  <button class="tb" id="tb-excel" title="Export to Excel (Ctrl+S)" disabled>
+    <svg viewBox="0 0 24 24"><path d="M5 3.5h9l5 5V20a.5.5 0 0 1-.5.5h-13A.5.5 0 0 1 5 20z"/><path d="M9 11l5 6M14 11l-5 6"/></svg>Export to Excel</button>
+  <button class="tb" id="tb-csv" title="Export the tables as CSV files in a zip" disabled>CSV</button>
+  <button class="tb" id="tb-sol" title="Save samaya's solution file" disabled>Solution file</button>
+</header>
+
+<!-- Cases -->
+<aside>
+  <div class="side-head"><span>Cases</span><span class="count" id="case-count"></span></div>
+  <div class="cases" id="cases"></div>
+</aside>
+
+<main id="main">
+  <!-- New case: the model and the settings -->
+  <section class="page" id="home">
+    <div class="page-head">
+      <h1>New case</h1>
+      <p class="sub">Choose a model file and the settings. samaya solves it; every answer is checked by samaya’s
+        verifier and re-checked independently from the model file before it is shown.</p>
+    </div>
+    <div class="rerun hidden" id="rerun">
+      <div class="txt"><b>Run again: <span id="rerun-name"></span></b>
+        <span class="muted">The settings below are that case’s. Change any of them, then run; both cases stay in the list.</span></div>
+      <button class="btn primary" id="rerun-btn">Run</button>
+      <button class="btn" id="rerun-close">Cancel</button>
+    </div>
+    <div class="home-grid">
+      <div class="panel">
+        <div class="panel-head">Model</div>
+        <div class="drop" id="drop">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h8l4 4V20a.5.5 0 0 1-.5.5h-11A.5.5 0 0 1 6 20V4a.5.5 0 0 1 .5-.5z"/><path d="M12 10v7M9 14l3 3 3-3"/></svg>
+          <div><b>Drop .mps or .qps files here</b><div class="muted">or <a href="#" id="browse-link">open model files…</a> Several files are solved one after another.</div></div>
+        </div>
+        <div class="subhead">Sample models (MRPL-style cases, illustrative data)</div>
+        <table class="grid-table samples"><thead><tr><th>Model</th><th>Type</th><th>Horizon</th><th></th></tr></thead>
+          <tbody id="samples"></tbody></table>
+      </div>
+      <div class="panel">
+        <div class="panel-head">Settings</div>
+        <div class="form">
+          <label for="opt-start">Start date</label>
+          <div><input id="opt-start" type="date"><div class="hint">Day 1 of the model’s horizon. Days, weeks and hours are shown as calendar dates from here.</div></div>
+          <label for="opt-time">Time limit</label>
+          <div class="with-unit"><input id="opt-time" type="number" min="1" value="60"><span>seconds</span></div>
+          <label for="opt-threads">Threads</label>
+          <div><select id="opt-threads"><option value="0">Automatic (all cores)</option><option>1</option><option>2</option><option>4</option><option>8</option><option>16</option></select></div>
+          <label for="opt-gap">MIP gap</label>
+          <div class="with-unit"><input id="opt-gap" type="number" min="0" step="0.01" value="0.01"><span>%</span></div>
+          <label for="opt-method">LP method</label>
+          <div><select id="opt-method"><option value="auto">Automatic</option><option value="dual">Dual simplex</option>
+            <option value="primal">Primal simplex</option><option value="barrier">Interior point (barrier)</option>
+            <option value="pdlp">PDLP (first-order)</option></select></div>
+          <label for="opt-presolve">Presolve</label>
+          <div><label class="check"><input id="opt-presolve" type="checkbox" checked> On</label></div>
+          <label>Verification</label>
+          <div class="fixed" title="Every result is verified; this cannot be turned off.">Always on</div>
+        </div>
+        <div class="hint" id="gpu-note"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- One case, or a comparison -->
+  <section class="page hidden" id="case"></section>
+</main>
+
+<footer class="statusbar">
+  <span id="sb-state">Ready</span>
+  <span class="sb-fill"></span>
+  <span>Verification: always on</span>
+  <span id="version">samaya</span>
+  <button class="sb-btn" id="theme-btn" title="Switch between the light and dark themes">Dark theme</button>
+</footer>
+
+<div class="drag-veil"><div>Drop to solve</div></div>
+<div class="toasts" id="toasts"></div>
+
+<script src="mock-result.js"></script>
+<script src="charts.js"></script>
+<script src="xlsx.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

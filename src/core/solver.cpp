@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "core/log.hpp"
+#include "core/xreal.hpp"
 #include "lp/ipm.hpp"
 #include "lp/lp_solver.hpp"
 #include "lp/pdlp.hpp"
@@ -134,10 +135,10 @@ bool solve_presolved_lp(const Model& model, const Params& params, const Logger& 
   model.A.multiply(lp.col_value, lp.row_activity);
   lp.col_dual.assign(static_cast<std::size_t>(n), 0.0);
   model.A.multiply_transpose(lp.row_dual, lp.col_dual);
-  long double objective = model.obj_offset;
+  Xreal objective = model.obj_offset;  // double-double: the same bits on every platform
   for (Index j = 0; j < n; ++j) {
     lp.col_dual[j] = model.obj[j] - lp.col_dual[j];
-    objective += static_cast<long double>(model.obj[j]) * lp.col_value[j];
+    objective += Xreal(model.obj[j]) * lp.col_value[j];
   }
   lp.objective = static_cast<double>(objective);
   if (params.verify && !verify_lp(model, lp, result)) {
@@ -320,10 +321,10 @@ bool solve_pdlp_lp(const Model& model, const Params& params, const Logger& log, 
     for (double& y : lp.row_dual) y *= -sense;
     lp.col_dual.assign(static_cast<std::size_t>(n), 0.0);
     model.A.multiply_transpose(lp.row_dual, lp.col_dual);
-    long double objective = model.obj_offset;
+    Xreal objective = model.obj_offset;  // double-double: the same bits on every platform
     for (Index j = 0; j < n; ++j) {
       lp.col_dual[j] = model.obj[j] - lp.col_dual[j];
-      objective += static_cast<long double>(model.obj[j]) * lp.col_value[j];
+      objective += Xreal(model.obj[j]) * lp.col_value[j];
     }
     lp.objective = static_cast<double>(objective);
   }

@@ -1,5 +1,6 @@
 #include "samaya_c.h"
 
+#include <algorithm>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -20,8 +21,10 @@ namespace {
 
 void write_error(char* errbuf, size_t errlen, const char* message) {
   if (errbuf == nullptr || errlen == 0) return;
-  std::strncpy(errbuf, message, errlen - 1);
-  errbuf[errlen - 1] = '\0';
+  // A bounded copy that always terminates (strncpy is deprecated by MSVC's CRT).
+  const size_t n = std::min(std::strlen(message), errlen - 1);
+  std::memcpy(errbuf, message, n);
+  errbuf[n] = '\0';
 }
 
 }  // namespace

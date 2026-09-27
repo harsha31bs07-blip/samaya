@@ -5,11 +5,21 @@
 // With --json, a single JSON object summarizing the run is printed as the last line of stdout;
 // bench/harness.py relies on that.
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellapi.h>
+#endif
+
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -21,6 +31,29 @@
 #include "samaya.hpp"
 
 namespace {
+
+// Paths are UTF-8 strings throughout. Opening them through std::filesystem::path makes MSVC use
+// the wide-character file APIs, so names outside the ANSI code page (e.g. Devanagari) work.
+std::filesystem::path utf8_path(const std::string& s) {
+  return std::filesystem::path(std::u8string(s.begin(), s.end()));
+}
+
+#ifdef _WIN32
+// The command line as UTF-8. Windows passes argv in the ANSI code page, which loses characters.
+std::vector<std::string> utf8_arguments() {
+  int n = 0;
+  LPWSTR* wide = CommandLineToArgvW(GetCommandLineW(), &n);
+  std::vector<std::string> out;
+  for (int i = 0; i < n; ++i) {
+    const int len = WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, nullptr, 0, nullptr, nullptr);
+    std::string arg(static_cast<std::size_t>(len > 1 ? len - 1 : 0), '\0');
+    if (len > 1) WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, arg.data(), len, nullptr, nullptr);
+    out.push_back(std::move(arg));
+  }
+  LocalFree(wide);
+  return out;
+}
+#endif
 
 constexpr int kExitOk = 0;
 constexpr int kExitReadError = 1;
@@ -90,7 +123,7 @@ std::string json_number(double v) {
 // Plain-text solution file: a header, then one line per column and per row.
 bool write_solution(const std::string& file, const samaya::Model& model,
                     const samaya::Result& result) {
-  std::ofstream out(file);
+  std::ofstream out(utf8_path(file));
   if (!out) return false;
   out.precision(17);
   out << "status " << samaya::to_string(result.status) << "\n";
@@ -137,7 +170,7 @@ bool write_solution(const std::string& file, const samaya::Model& model,
 // cannot be read.
 int read_mip_start(const std::string& file, const samaya::Model& model,
                    std::vector<double>& start) {
-  std::ifstream in(file);
+  std::ifstream in(utf8_path(file));
   if (!in) return -1;
   std::unordered_map<std::string, samaya::Index> index;
   for (samaya::Index j = 0; j < model.num_cols(); ++j) {
@@ -171,6 +204,15 @@ int read_mip_start(const std::string& file, const samaya::Model& model,
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+  SetConsoleOutputCP(CP_UTF8);
+  std::vector<std::string> utf8_args = utf8_arguments();
+  std::vector<char*> utf8_argv;
+  for (std::string& arg : utf8_args) utf8_argv.push_back(arg.data());
+  utf8_argv.push_back(nullptr);
+  argc = static_cast<int>(utf8_args.size());
+  argv = utf8_argv.data();
+#endif
   samaya::Params params;
   bool stats_only = false;
   bool json = false;

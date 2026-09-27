@@ -26,7 +26,7 @@ enum {
   SAMAYA_NOT_CONVEX = 11
 };
 
-/* Returns 0 on success. On failure *out is NULL and, if errbuf is non-NULL, a NUL-terminated
+/* Reads an MPS/QPS file; path is UTF-8. Returns 0 on success. On failure *out is NULL and, if errbuf is non-NULL, a NUL-terminated
    message of at most errlen bytes is written to it. */
 int samaya_read_mps(const char* path, samaya_model** out, char* errbuf, size_t errlen);
 void samaya_model_free(samaya_model* model);

@@ -14,3 +14,4 @@ __pycache__/
 bench/instances/
 bench/results/
 cases/instances/
+dist/

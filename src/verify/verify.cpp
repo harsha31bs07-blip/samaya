@@ -5,10 +5,13 @@
 #include <cstdio>
 #include <vector>
 
+#include "core/xreal.hpp"
+
 namespace samaya {
 namespace {
 
-using Real = long double;
+// Extended precision for sums and products: a double-double, the same bits on every platform.
+using Real = Xreal;
 
 void fail(VerifyReport& report, double violation, double tolerance, const char* what, Index index) {
   if (violation <= tolerance) return;
@@ -58,7 +61,7 @@ VerifyReport verify_primal(const Model& model, std::span<const double> x,
     }
   }
 
-  std::vector<Real> activity(static_cast<std::size_t>(m), 0.0L);
+  std::vector<Real> activity(static_cast<std::size_t>(m), Real());
   std::vector<double> magnitude(static_cast<std::size_t>(m), 0.0);
   const auto start = model.A.col_start();
   const auto index = model.A.row_index();
@@ -67,7 +70,7 @@ VerifyReport verify_primal(const Model& model, std::span<const double> x,
     for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
       const Real term = static_cast<Real>(value[p]) * x[j];
       activity[index[p]] += term;
-      magnitude[index[p]] = std::max(magnitude[index[p]], static_cast<double>(std::fabs(term)));
+      magnitude[index[p]] = std::max(magnitude[index[p]], static_cast<double>(fabs(term)));
     }
   }
   for (Index i = 0; i < m; ++i) {
@@ -86,7 +89,7 @@ VerifyReport verify_primal(const Model& model, std::span<const double> x,
     for (NnzIndex p = q_start[j]; p < q_start[j + 1]; ++p) {
       // Lower triangle: off-diagonal entries appear once but stand for two symmetric terms.
       const Real term = static_cast<Real>(q_value[p]) * x[q_index[p]] * x[j];
-      objective += q_index[p] == j ? 0.5L * term : term;
+      objective += q_index[p] == j ? 0.5 * term : term;
     }
   }
   report.objective = static_cast<double>(objective);
@@ -118,10 +121,10 @@ VerifyReport verify_kkt(const Model& model, std::span<const double> x, std::span
   const auto start = model.A.col_start();
   const auto index = model.A.row_index();
   const auto value = model.A.values();
-  std::vector<Real> activity(static_cast<std::size_t>(m), 0.0L);
+  std::vector<Real> activity(static_cast<std::size_t>(m), Real());
   std::vector<double> magnitude(static_cast<std::size_t>(m), 0.0);
   // (Qx)_j from the lower triangle, in extended precision.
-  std::vector<Real> qx(static_cast<std::size_t>(n), 0.0L);
+  std::vector<Real> qx(static_cast<std::size_t>(n), Real());
   std::vector<double> q_scale(static_cast<std::size_t>(n), 0.0);
   if (quadratic) {
     const auto q_start = model.Q.col_start();
@@ -132,11 +135,11 @@ VerifyReport verify_kkt(const Model& model, std::span<const double> x, std::span
         const Index i = q_index[p];
         const Real a = static_cast<Real>(q_value[p]) * x[j];
         qx[i] += a;
-        q_scale[i] += static_cast<double>(std::fabs(a));
+        q_scale[i] += static_cast<double>(fabs(a));
         if (i != j) {
           const Real b = static_cast<Real>(q_value[p]) * x[i];
           qx[j] += b;
-          q_scale[j] += static_cast<double>(std::fabs(b));
+          q_scale[j] += static_cast<double>(fabs(b));
         }
       }
     }
@@ -147,7 +150,7 @@ VerifyReport verify_kkt(const Model& model, std::span<const double> x, std::span
     for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
       const Real term = static_cast<Real>(value[p]) * y[index[p]];
       d -= term;
-      scale += static_cast<double>(std::fabs(term));
+      scale += static_cast<double>(fabs(term));
       activity[index[p]] += static_cast<Real>(value[p]) * x[j];
       magnitude[index[p]] =
           std::max(magnitude[index[p]], std::fabs(value[p] * x[j]));
@@ -221,8 +224,8 @@ VerifyReport verify_infeasibility(const Model& model, std::span<const double> y,
   }
 
   // f(x, r) = w'x - y'r with w = A'y (y normalized to max |y_i| = 1). Bound f over the box.
-  Real lo = 0.0L;
-  Real hi = 0.0L;
+  Real lo = 0.0;
+  Real hi = 0.0;
   double scale = 0.0;
   const auto add_term = [&](Real coef, double lower, double upper) {
     if (coef > 0) {
@@ -237,15 +240,15 @@ VerifyReport verify_infeasibility(const Model& model, std::span<const double> y,
   const auto index = model.A.row_index();
   const auto value = model.A.values();
   for (Index j = 0; j < n; ++j) {
-    Real w = 0.0L;
+    Real w = 0.0;
     double w_scale = 0.0;
     for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
       const Real term = static_cast<Real>(value[p]) * (y[index[p]] / y_max);
       w += term;
-      w_scale += static_cast<double>(std::fabs(term));
+      w_scale += static_cast<double>(fabs(term));
     }
     // Cancellation noise must not turn an infinite bound into an infinite range.
-    if (std::fabs(static_cast<double>(w)) <= 1e-9 * w_scale) w = 0.0L;
+    if (std::fabs(static_cast<double>(w)) <= 1e-9 * w_scale) w = 0.0;
     add_term(w, model.col_lower[j], model.col_upper[j]);
     if (w != 0) {
       scale = std::max({scale, std::fabs(static_cast<double>(w) * model.col_lower[j]),
@@ -265,7 +268,8 @@ VerifyReport verify_infeasibility(const Model& model, std::span<const double> y,
   if (lo > margin || hi < -margin) return report;
   report.ok = false;
   char buf[160];
-  std::snprintf(buf, sizeof buf, "certificate range [%.3Le, %.3Le] does not exclude zero", lo, hi);
+  std::snprintf(buf, sizeof buf, "certificate range [%.3e, %.3e] does not exclude zero",
+                static_cast<double>(lo), static_cast<double>(hi));
   report.message = buf;
   return report;
 }
@@ -289,7 +293,7 @@ VerifyReport verify_unbounded_ray(const Model& model, std::span<const double> ra
   }
 
   const double sense = model.sense == ObjSense::kMaximize ? -1.0 : 1.0;
-  Real slope = 0.0L;
+  Real slope = 0.0;
   double c_max = 0.0;
   for (Index j = 0; j < n; ++j) {
     const double v = ray[j] / v_max;
@@ -301,7 +305,7 @@ VerifyReport verify_unbounded_ray(const Model& model, std::span<const double> ra
     report.max_bound_violation = std::max(report.max_bound_violation, violation);
     fail(report, violation, tol.primal, "ray leaves the bounds of column", j);
   }
-  std::vector<Real> av(static_cast<std::size_t>(m), 0.0L);
+  std::vector<Real> av(static_cast<std::size_t>(m), Real());
   std::vector<double> magnitude(static_cast<std::size_t>(m), 0.0);
   const auto start = model.A.col_start();
   const auto index = model.A.row_index();
