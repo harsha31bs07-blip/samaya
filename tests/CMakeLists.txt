@@ -38,4 +38,11 @@ if(SAMAYA_BUILD_CLI)
     "\"status\":\"optimal\",\"verified\":true,\"objective\":11[,.]")
   add_test(NAME cli_missing_file COMMAND samaya_cli /nonexistent.mps)
   set_tests_properties(cli_missing_file PROPERTIES WILL_FAIL TRUE)
+  # The run report (cases/report.py): both formats on a generated MRPL case.
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME report_formats COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/report_smoke.sh
+      $<TARGET_FILE:samaya_cli> ${PROJECT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/report_smoke)
+    set_tests_properties(report_formats PROPERTIES PASS_REGULAR_EXPRESSION "report smoke test passed")
+  endif()
 endif()

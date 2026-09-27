@@ -9,6 +9,8 @@ money in lakh rupees.
 cmake --preset release && cmake --build --preset release
 cases/demo.sh            # small sizes, under a second
 cases/demo.sh large      # the largest sizes, about 25 s on a 4-core cloud machine
+cases/demo.sh --output html    # also a run report per model, as a web page
+cases/demo.sh --output excel   # ... or as an Excel workbook
 ```
 
 The demo generates the models (`cases/mrpl.py generate`), solves each with samaya (every
@@ -100,3 +102,16 @@ The search still proves optimality either way.
 Yesterday's on/off decisions were not feasible for today's steam demand, and the delayed cargo
 has columns yesterday's plan does not cover. So the start served as a repair seed, not as the
 incumbent.
+
+## Run reports
+
+`cases/report.py MODEL SOLUTION --run LOG --format html|excel` turns samaya's output files (the
+`--solution` file and the log with its `--json` summary) into a report:
+
+- **html**: one self-contained page (no network needed). It has the run summary, the verification
+  and the plan as charts and tables, then the solver log and the full solution. The verification
+  shows samaya's own verifier next to an independent re-check made by the report: it reads the
+  MPS file, recomputes every row, bound and the objective from the solution file, and compares.
+  Download buttons give the same tables as an Excel workbook or as CSV files.
+- **excel**: the same content as a workbook, one sheet per table. It is written with the Python
+  standard library only.
