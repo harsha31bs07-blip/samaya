@@ -37,6 +37,9 @@ class PdhgDevice {
   void advance();
   // v_prev <- v: drops the extrapolation momentum (a restart).
   void restart();
+  // Restart at (v, y): the current and the next iterate both become (v, y), so that the
+  // following advance() leaves v_prev = v = the given point.
+  void set_iterate(const std::vector<double>& v, const std::vector<double>& y);
   // Copies the iterates to the host (synchronizes). Any vector argument may be null.
   void download(std::vector<double>* v, std::vector<double>* v_new, std::vector<double>* y,
                 std::vector<double>* y_new, std::vector<double>* v_erg,

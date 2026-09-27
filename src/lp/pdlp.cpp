@@ -23,6 +23,8 @@ namespace {
 // Iterates evaluated (residuals, restarts, detection) once every this many iterations, PDLP's
 // termination_evaluation_frequency (Applegate et al. 2021).
 constexpr long long kCheckFrequency = 64;
+// Distances below this (scaled space) leave the primal weight unchanged at a restart.
+constexpr double kWeightDistanceFloor = 1e-10;
 
 // Power iteration to estimate ||A|| (largest singular value).
 // Returns an upper bound on the operator norm of [A -I].
@@ -215,21 +217,6 @@ void project_box(const std::vector<double>& lower, const std::vector<double>& up
   }
 }
 
-// Check if we should restart based on normalized duality gap.
-bool should_restart(double gap, double prev_gap, int iterations_since_restart) {
-  if (iterations_since_restart < 200) return false;
-  // Restart if gap is significantly increasing in magnitude with same sign (divergence)
-  if (gap * prev_gap > 0) {  // Same sign
-    if (std::fabs(gap) > 5.0 * std::fabs(prev_gap)) return true;
-  }
-  // Restart if gap is negative and consistently becoming more negative (strong unbounded signal)
-  // Only trigger if gap is significantly negative (< -1e-4) and decreasing
-  if (gap < -1e-4 && gap < prev_gap) {
-    return true;
-  }
-  if (std::fabs(gap) < 1e-12 && std::fabs(prev_gap) < 1e-12) return false;
-  return false;
-}
 }  // namespace
 
 PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Logger& log) {
@@ -289,8 +276,12 @@ PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Log
 
   // Step sizes: tau * sigma * L^2 <= 1. Use 0.99/L for tau and sigma with theta=1.0 (standard
   // PDHG).
-  double tau = 0.99 / L;
-  double sigma = 0.99 / L;
+  // PDLP's primal weight omega balances the two step sizes, tau = eta / omega and
+  // sigma = eta omega (tau sigma L^2 = eta^2 L^2 < 1), and is re-estimated at every restart.
+  const double eta = 0.99 / L;
+  double omega = 1.0;
+  double tau = eta / omega;
+  double sigma = eta * omega;
   double theta = 1.0;  // Standard PDHG/Chambolle-Pock extrapolation
 
   log.log(3, "pdlp: tau=%.3e, sigma=%.3e, theta=%.3e, m=%d, n=%d, nt=%d", tau, sigma, theta, m, n,
@@ -308,8 +299,6 @@ PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Log
   std::vector<double> y_erg(m, 0.0);   // Ergodic dual average
 
   // For unbounded detection: store iterate at restart
-  std::vector<double> v_at_restart(nt, 0.0);
-  bool has_restart_point = false;
   // Workspace vectors
   std::vector<double> residual(std::max(m, 1));
   std::vector<double> ATy(nt);
@@ -358,146 +347,28 @@ PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Log
       at_norm_max_row = std::max(at_norm_max_row, std::sqrt(row_norm));
     }
   }
-  double prev_gap = std::numeric_limits<double>::infinity();
-  double prev_prev_gap = std::numeric_limits<double>::infinity();
-  bool should_restart_next = false;
+  // Restart state (PDLP): the KKT error at the last restart and at the previous evaluation, and
+  // the point restarted from (for the primal weight update).
+  double kkt_at_restart = kInf;
+  double kkt_previous = kInf;
+  std::vector<double> v_restart(nt, 0.0);
+  std::vector<double> y_restart(m, 0.0);
 
-  log.log(3, "pdlp: after initialization, before main loop");
-
-  // --- Main PDHG loop ---
-  // Standard PDHG with extrapolation:
-  // v_bar = v + theta * (v - v_prev)
-  // y_new = y + sigma * (A_eq * v_bar_x - v_bar_r)
-  // v_new = proj(v - tau * (cost + A_eq^T y_new))
-  log.log(3, "pdlp: entering main loop, max_iter=%lld, m=%d, n=%d, nt=%d", max_iter, m, n, nt);
-  bool done = false;
-  for (long long iter = 0; iter < max_iter && !done; ++iter) {
-    if (options.time_limit < kInf && timer.seconds() > options.time_limit) {
-      result.status = SimplexStatus::kTimeLimit;
-      result.iterations = iter;
-      break;
-    }
-
-    // Adaptive restart at the BEGINNING of the iteration (affects current iteration's
-    // extrapolation) Decision is based on gaps from previous two iterations
-    if (should_restart_next) {
-      log.log(2, "pdlp: RESTART at iter %lld (triggered by prev gap=%.2e, prev_prev_gap=%.2e)",
-              iter, prev_gap, prev_prev_gap);
-      // Save current iterate as restart point for unbounded detection (only first restart)
-      if (!has_restart_point) {
-        v_at_restart = v;
-        has_restart_point = true;
-      }
-      // Restart: reset momentum by setting v_prev = v (so v_bar = v, no extrapolation)
-      // Also restart from the current iterate (which is the best so far)
-      v_prev = v;
-#ifdef SAMAYA_HAVE_CUDA
-      if (device) device->restart();
-#endif
-      iter_since_restart = 0;
-      should_restart_next = false;
-    }
-
-    // Only every kCheckFrequency-th iterate is evaluated (termination, restarts, detection), as
-    // in PDLP: the evaluation costs about as much as an iteration.
-    const bool evaluate = (iter + 1) % kCheckFrequency == 0 || iter + 1 == max_iter;
-#ifdef SAMAYA_HAVE_CUDA
-    if (device) {
-      device->step(tau, sigma, theta, iter);
-      if (!evaluate) {
-        device->advance();
-        continue;
-      }
-      device->download(&v, &v_new, nullptr, &y_new, &v_erg, &y_erg);
-    } else {
-#endif
-      // Standard PDHG extrapolation: v_bar = v + theta * (v - v_prev)
-      for (int j = 0; j < nt; ++j) {
-        v_bar[j] = v[j] + theta * (v[j] - v_prev[j]);
-      }
-
-      // Dual update: y_new = y + sigma * (A_eq * v_bar_x - v_bar_r)
-      // Residual is A_eq * v_bar_x - v_bar_r (this is [A_eq -I] * v_bar)
-      const auto a_eq_start = A_eq.col_start();
-      const auto a_eq_index = A_eq.row_index();
-      const auto a_eq_value = A_eq.values();
-
-      residual.assign(static_cast<std::size_t>(m), 0.0);
-      if (m > 0) {
-        for (int j = 0; j < n; ++j) {
-          double vj = v_bar[j];
-          if (vj == 0.0) continue;
-          for (NnzIndex p = a_eq_start[j]; p < a_eq_start[j + 1]; ++p) {
-            residual[a_eq_index[p]] += a_eq_value[p] * vj;
-          }
-        }
-        for (int i = 0; i < m; ++i) {
-          residual[i] -= v_bar[n + i];  // -I * v_bar_r
-        }
-      }
-
-      // y_new = y + sigma * residual (dual variables are FREE)
-      if (m > 0) {
-        for (int i = 0; i < m; ++i) {
-          y_new[i] = y[i] + sigma * residual[i];
-        }
-      }
-
-      // Compute A_eq^T y_new
-      const auto at_eq_start = At_eq.col_start();
-      const auto at_eq_index = At_eq.row_index();
-      const auto at_eq_value = At_eq.values();
-
-      ATy.assign(static_cast<std::size_t>(nt), 0.0);
-      if (m > 0) {
-        for (int i = 0; i < m; ++i) {
-          double yi = y_new[i];
-          if (yi == 0.0) continue;
-          for (NnzIndex p = at_eq_start[i]; p < at_eq_start[i + 1]; ++p) {
-            ATy[at_eq_index[p]] += at_eq_value[p] * yi;
-          }
-          ATy[n + i] = -yi;  // -I^T * y
-        }
-      }
-
-      // Primal update: v_new = proj(v - tau * (cost + A_eq^T y_new))
-      for (int j = 0; j < nt; ++j) {
-        double grad = cost_eq[j] + ATy[j];
-        v_new[j] = v[j] - tau * grad;
-      }
-      project_box(lower_eq, upper_eq, v_new);
-
-      // Update ergodic averages (running averages)
-      double alpha = 1.0 / (iter + 1);
-      for (int j = 0; j < nt; ++j) {
-        v_erg[j] = (1.0 - alpha) * v_erg[j] + alpha * v_new[j];
-      }
-      if (m > 0) {
-        for (int i = 0; i < m; ++i) {
-          y_erg[i] = (1.0 - alpha) * y_erg[i] + alpha * y_new[i];
-        }
-      }
-
-#ifdef SAMAYA_HAVE_CUDA
-    }
-#endif
-    if (!evaluate) {
-      v_prev.swap(v);
-      v.swap(v_new);
-      y.swap(y_new);
-      continue;
-    }
-
+  // Relative residuals and gap of an iterate (vv, yy) in the model's space.
+  struct Measure {
+    double rel_primal, rel_dual, rel_gap, gap, primal_obj, dual_obj;
+  };
+  const auto measure = [&](const std::vector<double>& vv, const std::vector<double>& yy) {
     // Map current iterate to original space for residual computation
-    // x_orig[j] = v_new[j] * col_scale[j] for j in 0..n-1
-    // r_orig[i] = v_new[n+i] / row_scale[i] for i in 0..m-1
-    // y_orig[i] = y_new[i] * row_scale[i] for i in 0..m-1
+    // x_orig[j] = vv[j] * col_scale[j] for j in 0..n-1
+    // r_orig[i] = vv[n+i] / row_scale[i] for i in 0..m-1
+    // y_orig[i] = yy[i] * row_scale[i] for i in 0..m-1
     std::vector<double> x_orig(lp.n);
     std::vector<double> r_orig(lp.m);
     std::vector<double> y_orig(lp.m);
-    for (int j = 0; j < lp.n; ++j) x_orig[j] = v_new[j] * col_scale[j];
-    for (int i = 0; i < lp.m; ++i) r_orig[i] = v_new[lp.n + i] / row_scale[i];
-    for (int i = 0; i < lp.m; ++i) y_orig[i] = y_new[i] * row_scale[i];
+    for (int j = 0; j < lp.n; ++j) x_orig[j] = vv[j] * col_scale[j];
+    for (int i = 0; i < lp.m; ++i) r_orig[i] = vv[lp.n + i] / row_scale[i];
+    for (int i = 0; i < lp.m; ++i) y_orig[i] = yy[i] * row_scale[i];
 
     // Primal residual in original space: ||A * x_orig - r_orig||
     double primal_res = 0.0;
@@ -593,6 +464,130 @@ PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Log
     double rel_primal = (m > 0) ? (primal_res / primal_scale) : 0.0;
     double rel_dual = (m > 0) ? (dual_res / dual_scale) : 0.0;
     double rel_gap = gap / gap_scale;
+    return Measure{rel_primal, rel_dual, rel_gap, gap, primal_obj, dual_obj};
+  };
+  // PDLP's KKT error, weighted by the primal weight.
+  const auto kkt = [&](const Measure& e) {
+    return std::sqrt(omega * omega * e.rel_primal * e.rel_primal +
+                     e.rel_dual * e.rel_dual / (omega * omega) + e.rel_gap * e.rel_gap);
+  };
+
+  log.log(3, "pdlp: after initialization, before main loop");
+
+  // --- Main PDHG loop ---
+  // Standard PDHG with extrapolation:
+  // v_bar = v + theta * (v - v_prev)
+  // y_new = y + sigma * (A_eq * v_bar_x - v_bar_r)
+  // v_new = proj(v - tau * (cost + A_eq^T y_new))
+  log.log(3, "pdlp: entering main loop, max_iter=%lld, m=%d, n=%d, nt=%d", max_iter, m, n, nt);
+  bool done = false;
+  for (long long iter = 0; iter < max_iter && !done; ++iter) {
+    if (options.time_limit < kInf && timer.seconds() > options.time_limit) {
+      result.status = SimplexStatus::kTimeLimit;
+      result.iterations = iter;
+      break;
+    }
+
+    // Only every kCheckFrequency-th iterate is evaluated (termination, restarts, detection), as
+    // in PDLP: the evaluation costs about as much as an iteration.
+    const bool evaluate = (iter + 1) % kCheckFrequency == 0 || iter + 1 == max_iter;
+#ifdef SAMAYA_HAVE_CUDA
+    if (device) {
+      device->step(tau, sigma, theta, iter_since_restart);
+      ++iter_since_restart;
+      if (!evaluate) {
+        device->advance();
+        continue;
+      }
+      device->download(&v, &v_new, nullptr, &y_new, &v_erg, &y_erg);
+    } else {
+#endif
+      // Standard PDHG extrapolation: v_bar = v + theta * (v - v_prev)
+      for (int j = 0; j < nt; ++j) {
+        v_bar[j] = v[j] + theta * (v[j] - v_prev[j]);
+      }
+
+      // Dual update: y_new = y + sigma * (A_eq * v_bar_x - v_bar_r)
+      // Residual is A_eq * v_bar_x - v_bar_r (this is [A_eq -I] * v_bar)
+      const auto a_eq_start = A_eq.col_start();
+      const auto a_eq_index = A_eq.row_index();
+      const auto a_eq_value = A_eq.values();
+
+      residual.assign(static_cast<std::size_t>(m), 0.0);
+      if (m > 0) {
+        for (int j = 0; j < n; ++j) {
+          double vj = v_bar[j];
+          if (vj == 0.0) continue;
+          for (NnzIndex p = a_eq_start[j]; p < a_eq_start[j + 1]; ++p) {
+            residual[a_eq_index[p]] += a_eq_value[p] * vj;
+          }
+        }
+        for (int i = 0; i < m; ++i) {
+          residual[i] -= v_bar[n + i];  // -I * v_bar_r
+        }
+      }
+
+      // y_new = y + sigma * residual (dual variables are FREE)
+      if (m > 0) {
+        for (int i = 0; i < m; ++i) {
+          y_new[i] = y[i] + sigma * residual[i];
+        }
+      }
+
+      // Compute A_eq^T y_new
+      const auto at_eq_start = At_eq.col_start();
+      const auto at_eq_index = At_eq.row_index();
+      const auto at_eq_value = At_eq.values();
+
+      ATy.assign(static_cast<std::size_t>(nt), 0.0);
+      if (m > 0) {
+        for (int i = 0; i < m; ++i) {
+          double yi = y_new[i];
+          if (yi == 0.0) continue;
+          for (NnzIndex p = at_eq_start[i]; p < at_eq_start[i + 1]; ++p) {
+            ATy[at_eq_index[p]] += at_eq_value[p] * yi;
+          }
+          ATy[n + i] = -yi;  // -I^T * y
+        }
+      }
+
+      // Primal update: v_new = proj(v - tau * (cost + A_eq^T y_new))
+      for (int j = 0; j < nt; ++j) {
+        double grad = cost_eq[j] + ATy[j];
+        v_new[j] = v[j] - tau * grad;
+      }
+      project_box(lower_eq, upper_eq, v_new);
+
+      // Update ergodic averages (running averages)
+      // Averages since the last restart (PDLP restarts to them).
+      double alpha = 1.0 / static_cast<double>(iter_since_restart + 1);
+      ++iter_since_restart;
+      for (int j = 0; j < nt; ++j) {
+        v_erg[j] = (1.0 - alpha) * v_erg[j] + alpha * v_new[j];
+      }
+      if (m > 0) {
+        for (int i = 0; i < m; ++i) {
+          y_erg[i] = (1.0 - alpha) * y_erg[i] + alpha * y_new[i];
+        }
+      }
+
+#ifdef SAMAYA_HAVE_CUDA
+    }
+#endif
+    if (!evaluate) {
+      v_prev.swap(v);
+      v.swap(v_new);
+      y.swap(y_new);
+      continue;
+    }
+
+    const Measure current = measure(v_new, y_new);
+    const Measure average = measure(v_erg, y_erg);
+    const double rel_primal = current.rel_primal;
+    const double rel_dual = current.rel_dual;
+    const double rel_gap = current.rel_gap;
+    const double gap = current.gap;
+    (void)gap;
 
     // Check convergence - early termination when all residuals are below tolerance
     // The gap must be small in magnitude: a negative gap (dual objective above the primal one)
@@ -607,6 +602,18 @@ PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Log
       result.gap = rel_gap;
       v = v_new;
       y = y_new;
+      break;
+    }
+    if (average.rel_primal < options.tol && average.rel_dual < options.tol &&
+        std::fabs(average.rel_gap) < options.tol) {
+      log.log(2, "pdlp: average converged at iter %lld", iter);
+      result.status = SimplexStatus::kOptimal;
+      result.iterations = iter + 1;
+      result.primal_residual = average.rel_primal;
+      result.dual_residual = average.rel_dual;
+      result.gap = average.rel_gap;
+      v = v_erg;
+      y = y_erg;
       break;
     }
 
@@ -955,13 +962,54 @@ PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Log
     //   prev_dual_res = rel_dual;
     // }
 
-    // Compute restart decision for NEXT iteration (based on current and previous gaps)
-    if (should_restart(gap, prev_gap, iter_since_restart)) {
-      should_restart_next = true;
-      log.log(2, "pdlp: Will RESTART at next iter (gap=%.2e prev_gap=%.2e iter_since_restart=%lld)",
-              gap, prev_gap, iter_since_restart);
+    // PDLP's adaptive restart (Applegate et al. 2021; the cuPDLP defaults 0.2, 0.8, 0.36): the
+    // candidate is the current iterate or the average since the last restart, whichever has the
+    // smaller KKT error; restart to it when that error fell to 0.2 of its value at the last
+    // restart, or to 0.8 and stopped falling, or when this restart has lasted 36% of all
+    // iterations. The primal weight moves halfway (in log scale) to the ratio of the dual and
+    // primal distances travelled since the last restart.
+    {
+      const double kkt_current = kkt(current);
+      const double kkt_average = kkt(average);
+      const bool to_average = kkt_average < kkt_current;
+      const double kkt_candidate = std::min(kkt_current, kkt_average);
+      if (!(kkt_at_restart < kInf)) kkt_at_restart = kkt_candidate;
+      const bool restart =
+          kkt_candidate <= 0.2 * kkt_at_restart ||
+          (kkt_candidate <= 0.8 * kkt_at_restart && kkt_candidate > kkt_previous) ||
+          static_cast<double>(iter_since_restart) >= 0.36 * static_cast<double>(iter + 1);
+      kkt_previous = kkt_candidate;
+      if (restart) {
+        const std::vector<double>& vc = to_average ? v_erg : v_new;
+        const std::vector<double>& yc = to_average ? y_erg : y_new;
+        double dx = 0.0;
+        double dy = 0.0;
+        for (int k = 0; k < nt; ++k) dx += (vc[k] - v_restart[k]) * (vc[k] - v_restart[k]);
+        for (int i = 0; i < m; ++i) dy += (yc[i] - y_restart[i]) * (yc[i] - y_restart[i]);
+        dx = std::sqrt(dx);
+        dy = std::sqrt(dy);
+        if (dx > kWeightDistanceFloor && dy > kWeightDistanceFloor) {
+          omega = std::exp(0.5 * std::log(dy / dx) + 0.5 * std::log(omega));
+          tau = eta / omega;
+          sigma = eta * omega;
+        }
+        log.log(2, "pdlp: restart at iter %lld to the %s (KKT %.2e), omega %.3e", iter,
+                to_average ? "average" : "current iterate", kkt_candidate, omega);
+        v_restart = vc;
+        y_restart = yc;
+        // The end of this iteration shifts v_new into v and v into v_prev: both become the
+        // candidate, so the next step starts without momentum.
+        v_new = v_restart;
+        v = v_restart;
+        y_new = y_restart;
+#ifdef SAMAYA_HAVE_CUDA
+        if (device) device->set_iterate(v_restart, y_restart);
+#endif
+        iter_since_restart = 0;
+        kkt_at_restart = kkt_candidate;
+        kkt_previous = kInf;
+      }
     }
-    iter_since_restart++;
 
     // Debug: log y_erg norm for infeasibility detection
     if (iter > 1000 && m > 0) {
@@ -973,10 +1021,6 @@ PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Log
     }
 
     // theta is fixed at 1.0 for standard PDHG/Chambolle-Pock
-
-    // Update gap history for next iteration's restart decision
-    prev_prev_gap = prev_gap;
-    prev_gap = gap;
 
     v_prev.swap(v);
     v.swap(v_new);

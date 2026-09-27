@@ -90,6 +90,7 @@ void test_pdlp_random_feasible() {
   opts.max_iterations = 100000;  // More iterations for difficult unbounded cases
 
   int optimal = 0, infeasible = 0, unbounded = 0, mismatches = 0;
+  long long optimal_iterations = 0;
   int verified_optimal = 0, verified_infeasible = 0, verified_unbounded = 0;
 
   for (int k = 0; k < 50; ++k) {
@@ -157,6 +158,7 @@ void test_pdlp_random_feasible() {
         if (report.ok) {
           verified = true;
           ++verified_optimal;
+          optimal_iterations += pdlp.iterations;
         } else {
           std::fprintf(stderr, "  Verification failed (optimal): %s\n", report.message.c_str());
         }
@@ -220,6 +222,11 @@ void test_pdlp_random_feasible() {
               infeasible, unbounded, mismatches);
   std::printf("  Verified: %d optimal, %d infeasible, %d unbounded\n", verified_optimal,
               verified_infeasible, verified_unbounded);
+  std::printf("  mean PDLP iterations to 1e-8 on the verified optima: %lld\n",
+              verified_optimal > 0 ? optimal_iterations / verified_optimal : 0LL);
+  // PDLP's restarts and primal weight (3309 iterations on average without them, 874 with them):
+  // a regression of either shows here first.
+  CHECK(verified_optimal > 0 && optimal_iterations / verified_optimal <= 1500);
   CHECK(optimal > 10);  // Should solve most feasible problems
   CHECK(mismatches == 0);
 }

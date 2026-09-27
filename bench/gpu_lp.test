@@ -1,0 +1,18 @@
+# Large LPs for PDLP on the CPU against the GPU, fixed on 2026-09-27 before any timed run: the
+# generated million-column refinery LP (bench/instances/large, see docs/results/large_lp.md) and
+# the Mittelmann subset of bench/mittelmann_lp.test. The largest, thk_48, has 8.6 million columns
+# and 6.4 million rows.
+large/refinery_20c_10p_11128t
+mittelmann/qap15
+mittelmann/L1_sixm250obs
+mittelmann/square41
+mittelmann/savsched1
+mittelmann/s250r10
+mittelmann/s100
+mittelmann/datt256_lp
+mittelmann/graph40-40
+mittelmann/irish-electricity
+mittelmann/ex10
+mittelmann/supportcase10
+mittelmann/thk_48
+mittelmann/thk_63

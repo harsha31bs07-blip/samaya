@@ -182,6 +182,18 @@ void PdhgDevice::restart() {
   SAMAYA_CUDA_CHECK(cudaMemcpy(d.v_prev, d.v, bytes, cudaMemcpyDeviceToDevice));
 }
 
+void PdhgDevice::set_iterate(const std::vector<double>& v, const std::vector<double>& y) {
+  Impl& d = *impl_;
+  const auto vbytes = static_cast<std::size_t>(d.n + d.m) * sizeof(double);
+  const auto ybytes = static_cast<std::size_t>(d.m) * sizeof(double);
+  SAMAYA_CUDA_CHECK(cudaMemcpy(d.v, v.data(), vbytes, cudaMemcpyHostToDevice));
+  SAMAYA_CUDA_CHECK(cudaMemcpy(d.v_new, v.data(), vbytes, cudaMemcpyHostToDevice));
+  if (ybytes > 0) {
+    SAMAYA_CUDA_CHECK(cudaMemcpy(d.y, y.data(), ybytes, cudaMemcpyHostToDevice));
+    SAMAYA_CUDA_CHECK(cudaMemcpy(d.y_new, y.data(), ybytes, cudaMemcpyHostToDevice));
+  }
+}
+
 void PdhgDevice::download(std::vector<double>* v, std::vector<double>* v_new,
                           std::vector<double>* y, std::vector<double>* y_new,
                           std::vector<double>* v_erg, std::vector<double>* y_erg) const {
