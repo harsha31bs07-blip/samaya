@@ -86,9 +86,15 @@ Recent MILP work, each item with tests and planted-bug checks (details in `docs/
    the first incumbent"): depth first with backtracking until the first incumbent. It finds
    solutions on rococoC10/B10, cost266-UUE and kakapo (A/B: solutions 52 -> 54, better 13 /
    worse 10, solved 12 both) but traps enlight_hard in a deep infeasible region (no incumbent in
-   60 s; best bound finds the optimum), so it is not merged. Next: a hybrid that interleaves
-   best-bound picks with backtracking, justified on principle rather than a node limit fitted
-   to these instances.
+   60 s; best bound finds the optimum), so it is not merged. The hybrid that alternates after
+   each failed plunge between backtracking and restarting at the best bound (commit "alternate
+   backtracking and best-bound restarts" on that branch) fixes the trap: enlight_hard finds its
+   optimum, rococoC10-001000 finds 16490. Bound A/B against f0cbe85: solved 12 both, better 14 /
+   worse 8, mean distance 20.00% -> 19.86%, geomean 47.42 -> 47.29 s; the reference tests catch
+   a planted node-dropping bug. Not merged yet: its best-bound pick scans the whole stack
+   (O(open nodes) per pick; ic97_potential lost 15% of its node rate at 60 s). Before merging,
+   index the stack by bound with lazy deletion (a multimap of live positions, tombstones popped
+   from the back), then rerun the A/B and the presets.
 3. **Presolve gap (measured):** HiGHS's presolve removes far more on about a dozen instances
    (columns after presolve, samaya vs HiGHS: app1-1 2477 vs 1059, milo-v12-6-r2-40-1 2688 vs
    1698, b1c1s1 3872 vs 2718, beasleyC3 2500 vs 1704, nu25-pr12 5834 vs 4263). Turning HiGHS's
