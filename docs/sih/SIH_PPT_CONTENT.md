@@ -126,13 +126,14 @@ settings for all solvers):
 | Netlib LP: time (geomean) | 0.36 s | 0.19 s | 0.47 s | 0.20 s | 0.42 s |
 | Refinery cases + generated MILPs, 16 models: solved | **16/16** | 16/16 | 16/16 | 16/16 | 11/16 |
 | Refinery cases: time (geomean) | **3.43 s (fastest)** | 5.18 s | 3.59 s | 4.02 s | 20.8 s |
-| MIPLIB 2017, 62 hard MILPs, 60 s: solved | 13 (was 7 before 26 Sep) | 18 | 19 | 8 | – |
+| MIPLIB 2017, 62 hard MILPs, 60 s: solved | 12-13 (was 7 before 26 Sep) | 18 | 19 | 8 | – |
+| MIPLIB 2017, 62 hard MILPs, 600 s: solved | 17 | 32 | 25 | – | – |
 
 Source: `docs/results/comparison.md`, laptop section (it also has the earlier cloud-machine run,
 where samaya was third on the refinery cases). The MIPLIB run gave every solver the same real
 time (a laptop clock quirk, corrected and explained there). samaya solves 4 MIPLIB instances
-that neither HiGHS nor SCIP solves in 60 s. **[FILL]** Add the 600 s MIPLIB row if it arrives
-in time.
+that neither HiGHS nor SCIP solves in 60 s, and at 600 s it solves mas74, which neither of
+them solves.
 
 - **Correctness:** no wrong answer on any instance; every result is cross-checked against the
   other solvers and published optimal values.

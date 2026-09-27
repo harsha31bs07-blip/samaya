@@ -157,6 +157,12 @@ measured against Windows' clock just before; see the clock note above). The earl
 
 The baselines of the earlier run: SCIP 19, HiGHS 18, CBC 8, the same counts.
 
+A rerun on the final build f0cbe85 (27 September, 06:40-07:38 IST) found the laptop's clock
+steady (factor 1.000; the baselines stopped at a median of 60.00 s, samaya at 59.99 s): samaya
+12/62 (46.85 s), HiGHS 18 (40.20 s), SCIP 19 (37.43 s), CBC 8 (53.64 s). The one difference from
+the 528b3ab run is enlight_hard, solved there in 29 s and not here; its bound varies widely from
+run to run (16% to 46% from the optimum after 60 s in tonight's A/Bs).
+
 Solve times of every instance samaya solves (seconds, final run; "–" = not solved in 60 s):
 
 | Instance | samaya | HiGHS | SCIP | CBC |
@@ -187,7 +193,53 @@ Solve times of every instance samaya solves (seconds, final run; "–" = not sol
 Since this run: rotating aggregation starts and clique cuts (f0cbe85; bound A/B in
 docs/MILP_PLAN.md).
 
-MIPLIB at 600 s and with 6 threads: to follow.
+### MIPLIB 2017, 62 instances, 600 s
+
+HiGHS and SCIP from the full 600 s run (26 September, 15:30-21:44 IST; they stop on the real-time
+clock, so they had 600 real seconds). samaya from a rerun alone on the final build f0cbe85
+(27 September, 04:14-06:38 IST): the samaya results of the full run are not used because its
+binary was rebuilt partway through (two builds in one run). samaya's limit was converted with
+the clock factor measured before the run (1.071); over the run the monotonic clock ran 4.7-6.3%
+fast (monotonic seconds per real second, from each shard's file times), so samaya had about
+1-2% more real time than the baselines.
+
+| Solver | Solved | Shifted geomean |
+|---|---|---|
+| HiGHS | 32/62 | 181.3 s |
+| SCIP | 25/62 | 180.1 s |
+| **samaya** | **17/62** | **293.2 s** |
+
+Every instance samaya solves (seconds; "–" = not solved in 600 s):
+
+| Instance | samaya | HiGHS | SCIP |
+|---|---|---|---|
+| mas74 | **323** | – | – |
+| neos5 | **45** | 91 | – |
+| markshare_4_0 | **16** | 123 | 110 |
+| mas76 | **19** | 106 | 62 |
+| pk1 | **33** | 209 | 120 |
+| exp-1-500-5-5 | **1** | 3 | 2 |
+| neos859080 (infeasible) | **0** | 1 | 1 |
+| binkar10_1 | 40 | **29** | 43 |
+| app1-1 | 13 | 18 | **6** |
+| p200x1188c | 3 | **1** | 4 |
+| sp150x300d | 1 | **0** | **0** |
+| neos17 | 29 | 7 | **6** |
+| nu25-pr12 | 57 | 5 | **3** |
+| mik-250-20-75-4 | 96 | **14** | 35 |
+| qap10 | 144 | 102 | **96** |
+| pg | 212 | **6** | 21 |
+| enlight_hard | 320 | 11 | **0** |
+
+- samaya solves mas74, which neither HiGHS nor SCIP solves in 600 s, and is 4-8x faster than
+  both on markshare_4_0, mas76 and pk1.
+- HiGHS or SCIP solve 19 that samaya does not: beasleyC3, mc11, n5-3 (big-M networks),
+  graph20-20-1rand, fhnw-binpack4-4 (symmetry), csched008, rococoC10-001000 (no first solution),
+  gmu-35-40, gen-ip054, mcsched, fastxgemm-n2r6s0t2, neos-3381206-awhea, neos-3627168-kasai,
+  neos-4738912-atrato, neos-911970, pg5_34, ran14x18-disj-8, timtab1 and tr12-30.
+- No wrong answer: every optimal samaya result passed the verifier and matches the MIPLIB value.
+
+MIPLIB with 6 threads (miplib600-t6): not run; at about 10 hours on this laptop it did not fit.
 
 ## Verified results: what samaya checks, and what the others do
 
