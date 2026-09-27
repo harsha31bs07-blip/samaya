@@ -11,11 +11,16 @@
 #           miplib600-t6   MIPLIB small (62), 600 s, samaya and HiGHS with 6 threads each
 #                          (HiGHS 1.15 has a parallel MIP solver; use SHARDS 2)
 #           miplib600-samaya  samaya alone on the 600 s set (same instance-to-shard split)
+#           maros          Maros-Meszaros convex QP (138), 300 s, samaya and HiGHS
+#           netlib-barrier Netlib LP (93), 300 s, samaya with --lp-method barrier alone
+#           mittelmann     Mittelmann LP subset (13, bench/mittelmann_lp.test), 1000 s, samaya
+#                          and HiGHS
 #   SHARDS  instances run at the same time (default 4; keep SHARDS x threads <= cores)
 #
 # Needs: the release build, python3 with highspy and pyscipopt, cbc and glpsol on PATH, and the
 # instances (bench/fetch_instances.sh netlib; bench/fetch_instances.sh miplib-list
-# bench/miplib_small.test; bench/generate_lps.py --set mip --out bench/instances/generated-mip).
+# bench/miplib_small.test; bench/generate_lps.py --set mip --out bench/instances/generated-mip;
+# bench/fetch_instances.sh maros; bench/fetch_instances.sh mittelmann).
 # SAMAYA_CLOCK_FACTOR (default 1): see bench/clock_factor.py; it gives samaya the same real time as
 # the baselines on a machine whose monotonic clock runs fast.
 # Writes bench/results/compare/SET/shard*.csv and prints each shard's summary; the combined
@@ -58,6 +63,24 @@ case "${set_name}" in
       baselines=(highspy)
       threads=6
     fi
+    ;;
+  maros)
+    files=(bench/instances/maros/*.mps)
+    limit=300
+    baselines=(highspy)
+    ;;
+  mittelmann)
+    dir="bench/instances/mittelmann"
+    mapfile -t files < <(grep -v '^#' bench/mittelmann_lp.test | grep -v '^$' |
+                         sed "s|^|${dir}/|; s|$|.mps|")
+    limit=1000
+    baselines=(highspy)
+    ;;
+  netlib-barrier)
+    files=(bench/instances/netlib/*.mps*)
+    limit=300
+    baselines=()
+    samaya="bench/samaya_barrier.sh"
     ;;
   *)
     echo "unknown set: ${set_name}" >&2

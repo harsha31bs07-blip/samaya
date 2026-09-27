@@ -40,6 +40,11 @@ VerifyReport verify_primal(const Model& model, std::span<const double> x,
 VerifyReport verify_lp_optimality(const Model& model, std::span<const double> x,
                                   std::span<const double> y, const VerifyTolerances& tol = {});
 
+// The same for a convex QP: the reduced costs are d = c + Qx - A'y, with Q the symmetric matrix
+// whose lower triangle is model.Q (objective c'x + 1/2 x'Qx). Convexity itself is not checked.
+VerifyReport verify_qp_optimality(const Model& model, std::span<const double> x,
+                                  std::span<const double> y, const VerifyTolerances& tol = {});
+
 // Checks a Farkas certificate y (one multiplier per row): the value of y'(A x) - y'r over all x
 // within the column bounds and r within the row bounds must exclude zero, which proves that
 // A x = r has no solution in the bounds.

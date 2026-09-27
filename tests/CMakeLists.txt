@@ -1,5 +1,6 @@
 add_executable(samaya_tests
   test_basis_factor.cpp
+  test_ldl.cpp
   test_lp_known.cpp
   test_lp_random.cpp
   test_mip.cpp
@@ -7,6 +8,7 @@ add_executable(samaya_tests
   test_model_and_solver.cpp
   test_mps_reader.cpp
   test_presolve.cpp
+  test_qp.cpp
   test_scaling.cpp
   test_sparse_matrix.cpp
   test_verify.cpp

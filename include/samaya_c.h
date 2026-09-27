@@ -22,7 +22,8 @@ enum {
   SAMAYA_NODE_LIMIT = 7,
   SAMAYA_NUMERICAL_ERROR = 8,
   SAMAYA_INVALID_MODEL = 9,
-  SAMAYA_NOT_IMPLEMENTED = 10
+  SAMAYA_NOT_IMPLEMENTED = 10,
+  SAMAYA_NOT_CONVEX = 11
 };
 
 /* Returns 0 on success. On failure *out is NULL and, if errbuf is non-NULL, a NUL-terminated

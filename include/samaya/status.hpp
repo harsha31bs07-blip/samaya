@@ -16,6 +16,7 @@ enum class Status : std::uint8_t {
   kNumericalError,
   kInvalidModel,
   kNotImplemented,
+  kNotConvex,  // A QP whose Q is not positive semidefinite (only convex QP is solved).
 };
 
 const char* to_string(Status status);

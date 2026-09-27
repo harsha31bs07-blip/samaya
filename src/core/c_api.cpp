@@ -13,6 +13,8 @@ struct samaya_model {
 
 static_assert(SAMAYA_NOT_IMPLEMENTED == static_cast<int>(samaya::Status::kNotImplemented),
               "C status codes must mirror samaya::Status");
+static_assert(SAMAYA_NOT_CONVEX == static_cast<int>(samaya::Status::kNotConvex),
+              "C status codes must mirror samaya::Status");
 
 namespace {
 
@@ -69,7 +71,7 @@ int samaya_solve(const samaya_model* model, double* objective) {
 }
 
 const char* samaya_status_string(int status) {
-  if (status < 0 || status > SAMAYA_NOT_IMPLEMENTED) return "unknown";
+  if (status < 0 || status > SAMAYA_NOT_CONVEX) return "unknown";
   return samaya::to_string(static_cast<samaya::Status>(status));
 }
 

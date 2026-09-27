@@ -15,6 +15,7 @@ const char* to_string(Status status) {
     case Status::kNumericalError: return "numerical_error";
     case Status::kInvalidModel: return "invalid_model";
     case Status::kNotImplemented: return "not_implemented";
+    case Status::kNotConvex: return "not_convex";
   }
   return "unknown";
 }

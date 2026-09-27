@@ -80,13 +80,18 @@ TEST(solver_reports_invalid_and_unimplemented) {
   bad.col_upper.pop_back();
   CHECK(solver.solve(bad).status == samaya::Status::kInvalidModel);
 
-  // Quadratic objectives are not solved yet.
+  // A convex QP is solved by the interior point and verified; MIQP is not implemented yet.
   Model qp = two_by_two();
   qp.col_type.assign(qp.col_type.size(), samaya::VarType::kContinuous);
   qp.Q = samaya::SparseMatrix::from_triplets(2, 2, {{0, 0, 1.0}});
   const samaya::Result r = solver.solve(qp);
-  CHECK(r.status == samaya::Status::kNotImplemented);
-  CHECK(std::isnan(r.objective));
+  CHECK(r.status == samaya::Status::kOptimal);
+  CHECK(r.verified);
+  Model miqp = two_by_two();
+  miqp.Q = samaya::SparseMatrix::from_triplets(2, 2, {{0, 0, 1.0}});
+  const samaya::Result r2 = solver.solve(miqp);
+  CHECK(r2.status == samaya::Status::kNotImplemented);
+  CHECK(std::isnan(r2.objective));
 
   // The mixed-integer model itself is solved: x1 = 1, x0 = 0 beats x1 = 0, x0 = 1000.
   const samaya::Result mip = solver.solve(two_by_two());

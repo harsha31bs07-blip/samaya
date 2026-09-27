@@ -1,0 +1,15 @@
+# Mittelmann LP subset, fixed on 2026-09-27 before any run: every instance in the root of
+# https://plato.asu.edu/ftp/lptestset/ that belongs to Mittelmann's feasible-LP benchmark.
+qap15
+L1_sixm250obs
+square41
+savsched1
+s250r10
+s100
+datt256_lp
+graph40-40
+irish-electricity
+ex10
+supportcase10
+thk_48
+thk_63

@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "core/log.hpp"
+#include "lp/ipm.hpp"
 #include "lp/lp_solver.hpp"
 #include "mip/branch_and_bound.hpp"
 #include "presolve/presolve.hpp"
@@ -143,8 +144,144 @@ bool solve_presolved_lp(const Model& model, const Params& params, const Logger& 
   return true;
 }
 
+// Fills an optimal LP/QP result from x and y (row duals): activities, reduced costs
+// d = c + Qx - A'y and the verified objective.
+void fill_continuous_optimum(const Model& model, std::vector<double> x, std::vector<double> y,
+                             const VerifyReport& report, Result& result) {
+  const Index n = model.num_cols();
+  result.objective = report.objective;
+  result.dual_bound = report.objective;
+  result.max_primal_violation = std::max(report.max_bound_violation, report.max_row_violation);
+  result.max_dual_violation = report.max_dual_violation;
+  result.row_activity.assign(static_cast<std::size_t>(model.num_rows()), 0.0);
+  model.A.multiply(x, result.row_activity);
+  std::vector<double> aty(static_cast<std::size_t>(n), 0.0);
+  model.A.multiply_transpose(y, aty);
+  result.col_dual.assign(static_cast<std::size_t>(n), 0.0);
+  for (Index j = 0; j < n; ++j) result.col_dual[j] = model.obj[j] - aty[j];
+  const auto q_start = model.Q.col_start();
+  const auto q_index = model.Q.row_index();
+  const auto q_value = model.Q.values();
+  for (Index j = 0; j < model.Q.cols(); ++j) {
+    for (NnzIndex p = q_start[j]; p < q_start[j + 1]; ++p) {
+      const Index i = q_index[p];
+      result.col_dual[i] += q_value[p] * x[j];
+      if (i != j) result.col_dual[j] += q_value[p] * x[i];
+    }
+  }
+  result.col_value = std::move(x);
+  result.row_dual = std::move(y);
+}
+
+// LP by the interior-point method (--lp-method barrier). Returns false when the caller should
+// fall back to the dual simplex: the IPM did not converge, or its point failed the strict
+// verifier (there is no crossover yet, so the point is not polished).
+bool solve_barrier_lp(const Model& model, const Params& params, const Logger& log,
+                      Result& result) {
+  IpmOptions options;
+  options.time_limit = params.time_limit;
+  const IpmResult ipm = solve_ipm(model, options, log);
+  result.barrier_iterations = ipm.iterations;
+  if (ipm.status != IpmStatus::kOptimal) {
+    log.log(1, "Barrier: %s; using the dual simplex", to_string(ipm.status));
+    return false;
+  }
+  // The last iterate first; the polished point if the iterate does not pass.
+  VerifyReport report = verify_lp_optimality(model, ipm.x, ipm.y);
+  if (report.ok || !params.verify) {
+    result.status = Status::kOptimal;
+    result.verified = params.verify;
+    fill_continuous_optimum(model, ipm.x, ipm.y, report, result);
+    return true;
+  }
+  if (!ipm.polished_x.empty()) {
+    const VerifyReport polished = verify_lp_optimality(model, ipm.polished_x, ipm.polished_y);
+    if (!polished.ok) log.log(2, "Barrier: polished point rejected (%s)", polished.message.c_str());
+    if (polished.ok) {
+      result.status = Status::kOptimal;
+      result.verified = true;
+      fill_continuous_optimum(model, ipm.polished_x, ipm.polished_y, polished, result);
+      return true;
+    }
+  }
+  log.log(1, "Barrier: point failed verification (%s); using the dual simplex",
+          report.message.c_str());
+  return false;
+}
+
+void solve_lp_model(const Model& model, const Params& params, const Logger& log, Result& result);
+
+// Convex QP by the interior-point method. The answer is reported optimal only if
+// verify_qp_optimality accepts it. If the IPM does not converge, the constraints alone are
+// solved as an LP by the dual simplex: an infeasible QP then gets a verified Farkas certificate.
+void solve_qp_model(const Model& model, const Params& params, const Logger& log,
+                    Result& result) {
+  const Timer timer;
+  IpmOptions options;
+  options.time_limit = params.time_limit;
+  const IpmResult ipm = solve_ipm(model, options, log);
+  result.barrier_iterations = ipm.iterations;
+  if (ipm.status == IpmStatus::kNotConvex) {
+    result.status = Status::kNotConvex;
+    result.message = "Q is not positive semidefinite; only convex QP is solved";
+    return;
+  }
+  if (ipm.status == IpmStatus::kOptimal) {
+    // The last iterate first; the polished point if the iterate does not pass.
+    const VerifyReport report = verify_qp_optimality(model, ipm.x, ipm.y);
+    if (!params.verify || report.ok) {
+      result.status = Status::kOptimal;
+      result.verified = params.verify;
+      fill_continuous_optimum(model, ipm.x, ipm.y, report, result);
+      return;
+    }
+    if (!ipm.polished_x.empty()) {
+      const VerifyReport polished = verify_qp_optimality(model, ipm.polished_x, ipm.polished_y);
+      if (!polished.ok) log.log(2, "QP: polished point rejected (%s)", polished.message.c_str());
+      if (polished.ok) {
+        result.status = Status::kOptimal;
+        result.verified = true;
+        fill_continuous_optimum(model, ipm.polished_x, ipm.polished_y, polished, result);
+        return;
+      }
+    }
+    result.status = Status::kNumericalError;
+    result.message = "interior-point solution failed verification: " + report.message;
+    result.max_primal_violation = std::max(report.max_bound_violation, report.max_row_violation);
+    result.max_dual_violation = report.max_dual_violation;
+    return;
+  }
+  if (ipm.status == IpmStatus::kTimeLimit) {
+    result.status = Status::kTimeLimit;
+    return;
+  }
+  // Not converged: decide feasibility with the simplex on the constraints alone.
+  Model feasibility = model;
+  feasibility.Q = SparseMatrix();
+  std::fill(feasibility.obj.begin(), feasibility.obj.end(), 0.0);
+  Params lp_params = params;
+  lp_params.time_limit = params.time_limit - timer.seconds();
+  lp_params.lp_method = LpMethod::kDualSimplex;
+  Result lp;
+  solve_lp_model(feasibility, lp_params, log, lp);
+  result.simplex_iterations = lp.simplex_iterations;
+  if (lp.status == Status::kInfeasible) {
+    result.status = Status::kInfeasible;
+    result.verified = lp.verified;
+    result.infeasibility_certificate = std::move(lp.infeasibility_certificate);
+    return;
+  }
+  result.status = ipm.status == IpmStatus::kIterationLimit ? Status::kIterationLimit
+                                                             : Status::kNumericalError;
+  result.message = std::string("interior point: ") + to_string(ipm.status) +
+                   (lp.status == Status::kOptimal ? " (the constraints are feasible)" : "");
+}
+
 void solve_lp_model(const Model& model, const Params& params, const Logger& log, Result& result) {
-  if (params.lp_method == LpMethod::kBarrier || params.lp_method == LpMethod::kPdlp) {
+  if (params.lp_method == LpMethod::kBarrier && solve_barrier_lp(model, params, log, result)) {
+    return;
+  }
+  if (params.lp_method == LpMethod::kPdlp) {
     log.log(1, "Requested LP method not available yet; using the dual simplex");
   }
   LpResult lp;
@@ -307,6 +444,8 @@ Result Solver::solve(const Model& model) const {
       solve_mip_model(model, params_, log, result);
       break;
     case ProblemClass::kQP:
+      solve_qp_model(model, params_, log, result);
+      break;
     case ProblemClass::kMIQP:
       // Branch-and-cut and the QP solvers land in later phases (PLAN.md).
       result.status = Status::kNotImplemented;

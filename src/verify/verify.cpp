@@ -93,8 +93,13 @@ VerifyReport verify_primal(const Model& model, std::span<const double> x,
   return report;
 }
 
-VerifyReport verify_lp_optimality(const Model& model, std::span<const double> x,
-                                  std::span<const double> y, const VerifyTolerances& tol) {
+namespace {
+
+// The optimality conditions of LP and convex QP: with d = c + Qx - A'y (Q empty for LP), every
+// column and row not at its lower (upper) bound must have a reduced cost that allows no
+// improvement. `quadratic` says whether Q enters d.
+VerifyReport verify_kkt(const Model& model, std::span<const double> x, std::span<const double> y,
+                        const VerifyTolerances& tol, bool quadratic) {
   VerifyReport report = verify_primal(model, x, tol);
   const Index n = model.num_cols();
   const Index m = model.num_rows();
@@ -115,9 +120,30 @@ VerifyReport verify_lp_optimality(const Model& model, std::span<const double> x,
   const auto value = model.A.values();
   std::vector<Real> activity(static_cast<std::size_t>(m), 0.0L);
   std::vector<double> magnitude(static_cast<std::size_t>(m), 0.0);
+  // (Qx)_j from the lower triangle, in extended precision.
+  std::vector<Real> qx(static_cast<std::size_t>(n), 0.0L);
+  std::vector<double> q_scale(static_cast<std::size_t>(n), 0.0);
+  if (quadratic) {
+    const auto q_start = model.Q.col_start();
+    const auto q_index = model.Q.row_index();
+    const auto q_value = model.Q.values();
+    for (Index j = 0; j < model.Q.cols(); ++j) {
+      for (NnzIndex p = q_start[j]; p < q_start[j + 1]; ++p) {
+        const Index i = q_index[p];
+        const Real a = static_cast<Real>(q_value[p]) * x[j];
+        qx[i] += a;
+        q_scale[i] += static_cast<double>(std::fabs(a));
+        if (i != j) {
+          const Real b = static_cast<Real>(q_value[p]) * x[i];
+          qx[j] += b;
+          q_scale[j] += static_cast<double>(std::fabs(b));
+        }
+      }
+    }
+  }
   for (Index j = 0; j < n; ++j) {
-    Real d = model.obj[j];
-    double scale = std::fabs(model.obj[j]);
+    Real d = model.obj[j] + qx[j];
+    double scale = std::fabs(model.obj[j]) + q_scale[j];
     for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
       const Real term = static_cast<Real>(value[p]) * y[index[p]];
       d -= term;
@@ -155,6 +181,18 @@ VerifyReport verify_lp_optimality(const Model& model, std::span<const double> x,
     fail(report, violation, tol.dual, "dual of row", i);
   }
   return report;
+}
+
+}  // namespace
+
+VerifyReport verify_lp_optimality(const Model& model, std::span<const double> x,
+                                  std::span<const double> y, const VerifyTolerances& tol) {
+  return verify_kkt(model, x, y, tol, false);
+}
+
+VerifyReport verify_qp_optimality(const Model& model, std::span<const double> x,
+                                  std::span<const double> y, const VerifyTolerances& tol) {
+  return verify_kkt(model, x, y, tol, true);
 }
 
 VerifyReport verify_infeasibility(const Model& model, std::span<const double> y,
