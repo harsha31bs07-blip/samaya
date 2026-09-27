@@ -318,3 +318,21 @@ TEST(miqp_random_models_match_brute_force) {
   CHECK(infeasible > 5);
 }
 
+TEST(lp_methods_stop_at_the_time_limit) {
+  // When the interior point or PDLP stops at the time limit, the solve ends there: no dual
+  // simplex fallback runs past the limit (it used to get the whole limit again).
+  std::mt19937 rng(76);
+  const Model model = samaya::test::random_lp(samaya::test::LpFamily::kFeasible, 300, 300, rng);
+  for (const samaya::LpMethod method : {samaya::LpMethod::kBarrier, samaya::LpMethod::kPdlp}) {
+    Params params;
+    params.log_level = 0;
+    params.presolve = false;
+    params.lp_method = method;
+    params.time_limit = 0.02;
+    const Result r = Solver(params).solve(model);
+    // Too little time for either method: it stops at the limit (or, on a fast machine, solves the
+    // LP itself); in neither case may the dual simplex run.
+    CHECK(r.status == Status::kTimeLimit || r.status == Status::kOptimal);
+    CHECK_EQ(r.simplex_iterations, 0);
+  }
+}

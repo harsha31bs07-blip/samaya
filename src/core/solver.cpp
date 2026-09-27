@@ -186,6 +186,10 @@ bool solve_barrier_lp(const Model& model, const Params& params, const Logger& lo
   options.time_limit = params.time_limit;
   const IpmResult ipm = solve_ipm(model, options, log);
   result.barrier_iterations = ipm.iterations;
+  if (ipm.status == IpmStatus::kTimeLimit) {
+    result.status = Status::kTimeLimit;
+    return false;
+  }
   if (ipm.status != IpmStatus::kOptimal) {
     log.log(1, "Barrier: %s; using the dual simplex", to_string(ipm.status));
     return false;
@@ -331,6 +335,10 @@ bool solve_pdlp_lp(const Model& model, const Params& params, const Logger& log, 
     lp.primal_ray = pdlp_result.primal_ray;
     scaled.unscale_cols(lp.primal_ray);  // In the scaled space of x, like the solution.
   }
+  if (lp.status == SimplexStatus::kTimeLimit) {
+    result.status = Status::kTimeLimit;
+    return false;
+  }
   const bool answered = lp.status == SimplexStatus::kOptimal ||
                         lp.status == SimplexStatus::kInfeasible ||
                         lp.status == SimplexStatus::kUnbounded;
@@ -399,12 +407,18 @@ void solve_miqp_model(const Model& model, const Params& params, const Logger& lo
   }
 }
 
-void solve_lp_model(const Model& model, const Params& params, const Logger& log, Result& result) {
-  if (params.lp_method == LpMethod::kBarrier && solve_barrier_lp(model, params, log, result)) {
-    return;
-  }
-  if (params.lp_method == LpMethod::kPdlp && solve_pdlp_lp(model, params, log, result)) {
-    return;
+void solve_lp_model(const Model& model, const Params& requested, const Logger& log,
+                    Result& result) {
+  const Timer timer;
+  Params params = requested;
+  if (requested.lp_method == LpMethod::kBarrier || requested.lp_method == LpMethod::kPdlp) {
+    const bool solved = requested.lp_method == LpMethod::kBarrier
+                            ? solve_barrier_lp(model, requested, log, result)
+                            : solve_pdlp_lp(model, requested, log, result);
+    // A time limit in the first method is final; after any other failure the dual simplex gets
+    // what is left of the limit.
+    if (solved || result.status == Status::kTimeLimit) return;
+    params.time_limit = requested.time_limit - timer.seconds();
   }
   LpResult lp;
   long long iterations = 0;
