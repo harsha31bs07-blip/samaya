@@ -112,6 +112,9 @@ struct MipOutcome {
   long long farkas_proofs = 0;               // Of conflicts_found: proofs from Farkas rays.
   long long strong_branching_conflicts = 0;  // Of conflicts_found: from strong-branching LPs.
   long long debug_conflict_violations = 0;  // Proofs that exclude debug_solution (must be 0).
+  // Proofs skipped as unable to tighten that would have tightened a column (must be 0; checked
+  // only with debug_solution, where skipped proofs are still evaluated).
+  long long debug_conflict_skip_errors = 0;
   // Farkas rays of infeasible LPs (kept as a proof or not) that, mapped to the original rows,
   // verify_infeasibility rejects on their LP's bounds, or missing rays (must be 0; checked only
   // with debug_solution).

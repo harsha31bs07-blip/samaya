@@ -204,6 +204,7 @@ void BranchAndBound::analyze_cutoff_lp() {
 }
 
 bool BranchAndBound::propagate_conflicts(std::vector<BoundChange>* record) {
+  const bool debug = !options_.debug_solution.empty();
   std::vector<Index> changed;
   const double limit = conflict_limit();
   for (Conflict& c : conflicts_) {
@@ -217,11 +218,15 @@ bool BranchAndBound::propagate_conflicts(std::vector<BoundChange>* record) {
     double max_act = 0.0;
     int min_inf = 0;
     int max_inf = 0;
+    double max_range = 0.0;  // Largest |a_j| (u_j - l_j) over the integer columns.
     for (std::size_t k = 0; k < c.index.size(); ++k) {
       const Index j = c.index[k];
       const double a = c.value[k];
       const double lo = a > 0.0 ? lower_[j] : upper_[j];
       const double up = a > 0.0 ? upper_[j] : lower_[j];
+      if (model_.col_type[j] == VarType::kInteger) {
+        max_range = std::max(max_range, std::fabs(a) * (upper_[j] - lower_[j]));
+      }
       if (std::isfinite(lo)) {
         min_act += a * lo;
       } else {
@@ -237,7 +242,13 @@ bool BranchAndBound::propagate_conflicts(std::vector<BoundChange>* record) {
       c.last_used = outcome_.nodes;
       return false;
     }
-    // Tighten the integer columns (as propagate() does for the rows).
+    // Tighten the integer columns (as propagate() does for the rows). A side tightens column j
+    // only if its activity is finite and its slack below |a_j| (u_j - l_j): skip the proof when
+    // neither side can.
+    const bool upper_slack = ru == kInf || min_inf > 0 || ru - min_act >= max_range;
+    const bool lower_slack = rl == -kInf || max_inf > 0 || max_act - rl >= max_range;
+    const bool skip = upper_slack && lower_slack;
+    if (skip && !debug) continue;
     bool used = false;
     for (std::size_t k = 0; k < c.index.size(); ++k) {
       const Index j = c.index[k];
@@ -264,6 +275,10 @@ bool BranchAndBound::propagate_conflicts(std::vector<BoundChange>* record) {
         } else {
           new_up = std::min(new_up, std::floor(b + t));
         }
+      }
+      if (skip && (new_lo > new_up || new_lo > lower_[j] || new_up < upper_[j])) {
+        ++outcome_.debug_conflict_skip_errors;  // Tests: the skip test missed a tightening.
+        continue;
       }
       if (new_lo > new_up) {
         c.last_used = outcome_.nodes;

@@ -810,6 +810,7 @@ TEST(mip_conflicts_never_exclude_an_optimal_solution) {
   long long infeasible_lps = 0;
   long long farkas = 0;
   long long farkas_failures = 0;
+  long long skip_errors = 0;  // Proofs skipped although they would have tightened a column.
   int models = 0;
   std::mt19937 rng(171);
   for (int k = 0; k < 120; ++k) {
@@ -840,6 +841,7 @@ TEST(mip_conflicts_never_exclude_an_optimal_solution) {
     infeasible_lps += out.conflict_infeasible_lps;
     farkas += out.farkas_proofs;
     farkas_failures += out.debug_farkas_failures;
+    skip_errors += out.debug_conflict_skip_errors;
     CHECK(out.status == Status::kOptimal);
     CHECK(std::fabs(out.objective - ref.objective) <= 1e-6 * (1 + std::fabs(ref.objective)));
   }
@@ -848,6 +850,7 @@ TEST(mip_conflicts_never_exclude_an_optimal_solution) {
               models, found, farkas, infeasible_lps, prunes, violations, farkas_failures);
   CHECK_EQ(violations, 0);
   CHECK_EQ(farkas_failures, 0);
+  CHECK_EQ(skip_errors, 0);
   CHECK(models > 80);
   CHECK(found > 200);
   CHECK(prunes > 20);
