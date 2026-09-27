@@ -46,9 +46,9 @@ optimization solver for refinery planning and scheduling"**.
 - Refineries decide every day which crude to buy, how to run units, how to blend products and
   when to receive ships. These are **linear and mixed-integer optimization problems (LP/MILP)**.
 - Today they depend on foreign solvers (CPLEX, Gurobi) or open-source ones built abroad.
-- We built **samaya, a complete LP/MILP solver written from scratch in C++20**. No external
-  solver or linear-algebra code is inside; HiGHS, SCIP, CBC and GLPK are used only to compare
-  results.
+- We built **samaya, a complete LP / MILP / convex QP solver written from scratch in C++20**.
+  No external solver or linear-algebra code is inside; HiGHS, SCIP, CBC and GLPK are used only
+  to compare results.
 - It reads standard model files (MPS), so existing refinery models run unchanged. It has a
   command-line tool and C/C++ APIs.
 
@@ -66,6 +66,8 @@ optimization solver for refinery planning and scheduling"**.
   it is reported. It is on by default.
 - **GPU acceleration** for very large LPs with PDLP, the first-order method behind Google's PDLP
   and NVIDIA's cuOpt. **[FILL: GPU teammate's one-line result]**
+- **Two LP engines of our own:** a dual simplex and an interior-point method, which also solves
+  convex QP (blending with quality penalties, least-squares planning).
 - **Modern MILP techniques implemented by us:**
   - Feasibility Jump (2023 research);
   - cutting planes inside the search tree;
@@ -91,8 +93,11 @@ Refinery model (MPS file)
       ▼
 Presolve: shrinks the model
       │
-      ├──► LP:   dual simplex with our own sparse LU factorization
-      │          (or GPU PDLP for very large LPs)
+      ├──► LP:   dual simplex with our own sparse LU factorization,
+      │          interior point with our own sparse LDLᵀ,
+      │          or GPU PDLP for very large LPs
+      │
+      ├──► QP:   interior point (convex QP), non-convex models refused
       │
       └──► MILP: branch-and-cut
                  • cutting planes (Gomory, MIR, covers, flow covers), also in the tree
@@ -105,6 +110,8 @@ Independent verifier (certificates) ──► Result / plan report
 
 **Built and working today (for the speaker):**
 - An LP engine: dual simplex, sparse LU with updates, presolve, scaling.
+- An interior-point engine for LP and convex QP: sparse LDLᵀ with a minimum-degree ordering,
+  Mehrotra predictor–corrector.
 - A MILP engine: branch-and-cut with the techniques above.
 - The verifier.
 - The case studies with a readable plan report.
@@ -141,6 +148,19 @@ them solves.
 - samaya solves **4 MIPLIB instances that neither HiGHS nor SCIP solves in 60 s**
   (markshare_4_0, neos5, mas76, pk1).
 
+**How samaya meets each requirement of SIH26119** (backup slide, or the table for slide 4 if
+the template allows; every number is from a run in `docs/results/`):
+
+| The problem statement asks for | samaya today |
+|---|---|
+| LP, MILP **and QP**, built from scratch | All three. QP by our own interior-point method on our own sparse LDLᵀ factorization; 105 of 138 Maros–Mészáros convex QPs solved and verified in a 60 s screen (**[FILL: timed run vs HiGHS, docs/results/qp.md]**) |
+| Revised simplex **and interior point** | Dual simplex with our own sparse LU; interior point for LP and QP (`--lp-method barrier`: 71 of 93 Netlib LPs verified from the interior point alone, all 93 verified) |
+| Branch-and-cut, cuts, presolve, heuristics, node selection | All implemented and measured one by one on fixed MIPLIB sets |
+| Multi-core, GPU where it helps | Parallel tree search; GPU PDLP for large LPs (**[FILL: teammate's measured speedup and sizes]**) |
+| MIPLIB, Netlib, Mittelmann, QPLIB; compared with an established solver | Netlib, MIPLIB 2017, Maros–Mészáros, MRPL cases; compared with **four** solvers (HiGHS, SCIP, CBC, GLPK) (**[FILL: Mittelmann subset]**) |
+| Numerical robustness: degeneracy, weak relaxations, ill-conditioning | `docs/results/robustness.md`: 12 Netlib models with coefficient ranges up to 3·10¹² all verified; degenerate models match 4 solvers; 28 of 29 infeasible models proven with certificates; root cuts close 76–98% of the gap on weak MIPLIB relaxations; **zero wrong answers** in every run |
+| Refinery, blending, scheduling, power, logistics | Three MRPL case families (planning LP, crude scheduling MILP, utilities MILP), fastest of five solvers on them |
+
 **Challenges and risks → how we handle them:**
 
 | Challenge | Strategy |
@@ -152,8 +172,8 @@ them solves.
 
 **Viability:**
 - It runs on a laptop and has no licence cost.
-- The code is modular: QP (blending and pooling) and larger models fit into the same
-  structure.
+- The code is modular: convex QP already runs on the interior-point engine; MIQP (branch and
+  bound over QP) and larger models fit into the same structure.
 
 ---
 

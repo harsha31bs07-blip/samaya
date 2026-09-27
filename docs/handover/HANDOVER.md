@@ -75,6 +75,9 @@ Recent MILP work, each item with tests and planted-bug checks (details in `docs/
 
 ## Next tasks, in the order agreed
 
+The detailed, ordered plan after the 27 September research (targets, tests, gates) is
+`docs/IMPROVEMENT_PLAN.md`; the list below is the earlier summary.
+
 1. **Conflict analysis, remaining limit:** a round-off coefficient on a column with an infinite
    bound loses a Farkas proof (the proof cannot be relaxed validly there). Strong-branching
    proofs are in (A/B neutral); their pool pass costs every node, so watch it on large models.
