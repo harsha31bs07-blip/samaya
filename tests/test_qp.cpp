@@ -233,3 +233,88 @@ TEST(barrier_lp_matches_reference) {
   CHECK_EQ(mismatches, 0);
   CHECK(by_barrier > 200);
 }
+
+namespace {
+
+// Brute force for small MIQPs: every assignment of the integer columns within their (finite)
+// bounds, the continuous rest solved by the dense QP reference; the best feasible one.
+ReferenceQpResult brute_force_miqp(const Model& model) {
+  std::vector<int> ints;
+  for (int j = 0; j < model.num_cols(); ++j) {
+    if (model.col_type[j] == samaya::VarType::kInteger) ints.push_back(j);
+  }
+  ReferenceQpResult best;
+  const bool maximize = model.sense == ObjSense::kMaximize;
+  std::vector<double> value(ints.size());
+  for (std::size_t k = 0; k < ints.size(); ++k) value[k] = model.col_lower[ints[k]];
+  for (;;) {
+    Model fixed = model;
+    fixed.col_type.assign(fixed.col_type.size(), samaya::VarType::kContinuous);
+    for (std::size_t k = 0; k < ints.size(); ++k) {
+      fixed.col_lower[ints[k]] = fixed.col_upper[ints[k]] = value[k];
+    }
+    const ReferenceQpResult r = samaya::test::reference_qp(fixed);
+    if (r.status == ReferenceQpResult::Status::kOptimal &&
+        (best.status != ReferenceQpResult::Status::kOptimal ||
+         (maximize ? r.objective > best.objective : r.objective < best.objective))) {
+      best = r;
+    }
+    std::size_t k = 0;
+    for (; k < ints.size(); ++k) {
+      if (value[k] < model.col_upper[ints[k]]) {
+        value[k] += 1.0;
+        break;
+      }
+      value[k] = model.col_lower[ints[k]];
+    }
+    if (k == ints.size()) break;
+  }
+  return best;
+}
+
+}  // namespace
+
+TEST(miqp_random_models_match_brute_force) {
+  // Convex QPs with 1-2 integer columns (boxed, integral bounds): branch and bound over the QP
+  // relaxations must find the brute-force optimum, or prove infeasibility when no integer
+  // assignment is feasible; every solution passes the verifier with integrality.
+  std::mt19937 rng(75);
+  int optimal = 0;
+  int infeasible = 0;
+  int mismatches = 0;
+  for (const QpFamily family : {QpFamily::kStrictlyConvex, QpFamily::kLowRank}) {
+    for (int k = 0; k < 100; ++k) {
+      Model model = random_qp(family, rng);
+      const int ints = std::min(model.num_cols(), 1 + static_cast<int>(rng() % 2));
+      for (int j = 0; j < ints; ++j) model.col_type[j] = samaya::VarType::kInteger;
+      const ReferenceQpResult ref = brute_force_miqp(model);
+      Params params;
+      params.log_level = 0;
+      params.presolve = false;
+      params.mip_rel_gap = 0.0;
+      params.mip_abs_gap = 1e-9;
+      const Result r = Solver(params).solve(model);
+      bool same = false;
+      if (ref.status == ReferenceQpResult::Status::kOptimal) {
+        ++optimal;
+        same = r.status == Status::kOptimal && r.verified &&
+               std::fabs(r.objective - ref.objective) <= 1e-6 * (1.0 + std::fabs(ref.objective));
+      } else {
+        ++infeasible;
+        same = r.status == Status::kInfeasible;
+      }
+      if (!same) {
+        ++mismatches;
+        std::printf("  mismatch: status %s objective %.10g vs brute force %s %.10g\n",
+                    samaya::to_string(r.status), r.objective,
+                    ref.status == ReferenceQpResult::Status::kOptimal ? "optimal" : "infeasible",
+                    ref.objective);
+      }
+    }
+  }
+  std::printf("  %d optimal, %d infeasible, %d mismatches\n", optimal, infeasible, mismatches);
+  CHECK_EQ(mismatches, 0);
+  CHECK(optimal > 100);
+  CHECK(infeasible > 5);
+}
+

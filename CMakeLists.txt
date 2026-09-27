@@ -76,6 +76,7 @@ add_library(samaya
   src/mip/conflicts.cpp
   src/mip/feasibility_jump.cpp
   src/presolve/presolve.cpp
+  src/qp/miqp.cpp
   src/linalg/scaling.cpp
   src/linalg/sparse_matrix.cpp
   src/verify/verify.cpp

@@ -10,6 +10,7 @@
 #include "lp/pdlp.hpp"
 #include "mip/branch_and_bound.hpp"
 #include "presolve/presolve.hpp"
+#include "qp/miqp.hpp"
 #include "samaya/verify.hpp"
 
 #ifndef SAMAYA_VERSION_STRING
@@ -356,6 +357,48 @@ bool solve_pdlp_lp(const Model& model, const Params& params, const Logger& log, 
   return true;
 }
 
+// Mixed-integer convex QP by branch and bound over the QP relaxations. The returned solution is
+// checked against the original model (bounds, rows, integrality); the optimality of the bound
+// rests on the search, as for MILP.
+void solve_miqp_model(const Model& model, const Params& params, const Logger& log,
+                      Result& result) {
+  MiqpOptions options;
+  options.time_limit = params.time_limit;
+  options.node_limit = params.node_limit;
+  options.rel_gap = params.mip_rel_gap;
+  options.abs_gap = params.mip_abs_gap;
+  options.integrality_tol = params.integrality_tol;
+  const MiqpOutcome out = solve_miqp(model, options, log);
+  result.status = out.status;
+  result.nodes = out.nodes;
+  result.barrier_iterations = out.ipm_iterations;
+  result.dual_bound = out.bound;
+  if (out.status == Status::kNotConvex) {
+    result.message = "Q is not positive semidefinite; only convex MIQP is solved";
+  }
+  if (out.x.empty()) return;
+  VerifyTolerances tol;
+  tol.integrality = params.integrality_tol;
+  const VerifyReport report = verify_primal(model, out.x, tol);
+  result.max_primal_violation = std::max(report.max_bound_violation, report.max_row_violation);
+  result.objective = report.objective;
+  result.col_value = out.x;
+  result.row_activity.assign(static_cast<std::size_t>(model.num_rows()), 0.0);
+  model.A.multiply(result.col_value, result.row_activity);
+  if (params.verify) {
+    result.verified = report.ok;
+    if (!report.ok) {
+      result.message = "solution failed verification: " + report.message;
+      result.status = Status::kNumericalError;
+    }
+  }
+  if (result.status == Status::kOptimal) {
+    result.dual_bound = model.sense == ObjSense::kMinimize
+                            ? std::min(result.dual_bound, result.objective)
+                            : std::max(result.dual_bound, result.objective);
+  }
+}
+
 void solve_lp_model(const Model& model, const Params& params, const Logger& log, Result& result) {
   if (params.lp_method == LpMethod::kBarrier && solve_barrier_lp(model, params, log, result)) {
     return;
@@ -526,9 +569,7 @@ Result Solver::solve(const Model& model) const {
       solve_qp_model(model, params_, log, result);
       break;
     case ProblemClass::kMIQP:
-      // Branch-and-cut and the QP solvers land in later phases (PLAN.md).
-      result.status = Status::kNotImplemented;
-      result.message = std::string(to_string(model.problem_class())) + " solver not implemented yet";
+      solve_miqp_model(model, params_, log, result);
       break;
   }
 
