@@ -26,8 +26,8 @@ template: 6 slides, in the order and with the headings below.
 | Field | Content |
 |---|---|
 | Problem Statement ID | 26119 |
-| Problem Statement Title | **[FILL: copy exactly from the SIH portal]**. Ours is about an indigenous, GPU-accelerated optimization (LP/MILP) solver for MRPL. |
-| Theme | **[FILL: from the portal]** |
+| Problem Statement Title | Indigenous GPU-Accelerated Optimization Solver (Sovereign Alternative to Express / CEPLEX) (as listed for SIH26119, spelling included; check it once against the portal) |
+| Theme | Miscellaneous |
 | PS Category | Software |
 | Team ID | **[FILL]** |
 | Team Name | **[FILL]** |
@@ -82,7 +82,8 @@ plan" with a check mark.
 
 **Technologies:**
 - **Language and build:** C++20, CMake; runs on Linux and Windows (WSL).
-- **GPU:** CUDA on an NVIDIA RTX 3060, for the PDLP LP solver.
+- **GPU:** CUDA 12 on the laptop's NVIDIA RTX 3050 (6 GB, Ampere), for the PDLP LP solver: our own
+  sparse matrix-vector kernel; the GPU runs the iterations and the CPU keeps every decision.
 - **Benchmarks and case generators:** Python.
 - **No external solver libraries.**
 
@@ -135,6 +136,7 @@ settings for all solvers):
 | Refinery cases: time (geomean) | **3.43 s (fastest)** | 5.18 s | 3.59 s | 4.02 s | 20.8 s |
 | MIPLIB 2017, 62 hard MILPs, 60 s: solved | 12-13 (was 7 before 26 Sep) | 18 | 19 | 8 | – |
 | MIPLIB 2017, 62 hard MILPs, 600 s: solved | 17 | 32 | 25 | – | – |
+| Convex QP, Maros–Mészáros (138 models), 300 s: solved and verified | **106** | 104 | – | – | – |
 
 Source: `docs/results/comparison.md`, laptop section (it also has the earlier cloud-machine run,
 where samaya was third on the refinery cases). The MIPLIB run gave every solver the same real
@@ -153,7 +155,7 @@ the template allows; every number is from a run in `docs/results/`):
 
 | The problem statement asks for | samaya today |
 |---|---|
-| LP, MILP **and QP**, built from scratch | All three. QP by our own interior-point method on our own sparse LDLᵀ factorization; 105 of 138 Maros–Mészáros convex QPs solved and verified in a 60 s screen (**[FILL: timed run vs HiGHS, docs/results/qp.md]**) |
+| LP, MILP **and QP**, built from scratch | All three, plus MIQP. QP by our own interior-point method on our own sparse LDLᵀ factorization: Maros–Mészáros convex QP set, 300 s, **106 of 138 solved and verified vs HiGHS 104**, faster on the models both solve (shifted geomean 0.20 s vs 1.82 s); HiGHS returned 2 wrong optima (checked with SCIP), samaya none (`docs/results/qp.md`) |
 | Revised simplex **and interior point** | Dual simplex with our own sparse LU; interior point for LP and QP (`--lp-method barrier`: 71 of 93 Netlib LPs verified from the interior point alone, all 93 verified) |
 | Branch-and-cut, cuts, presolve, heuristics, node selection | All implemented and measured one by one on fixed MIPLIB sets |
 | Multi-core, GPU where it helps | Parallel tree search; GPU PDLP for large LPs (**[FILL: teammate's measured speedup and sizes]**) |

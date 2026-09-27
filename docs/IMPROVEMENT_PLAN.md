@@ -74,11 +74,15 @@ A/B.
    - **Why it fails:** at every node it costs too much; node counts fall, e.g. csched007
      14,645 → 1,032.
    - Local branch `claude/rr-wip`. A root-only variant is untested.
-3. **RENS in the tree without an incumbent.** Today RENS runs only at the root. Rerun it on the
-   node LP at nodes 200, 400, 800 and so on (doubling), inside the existing sub-MIP time share,
-   while there is no incumbent.
-   - **Target:** rococoC10, cost266-UUE, ic97_potential, csched007.
-   - **Effort:** 3 h.
+3. **RENS in the tree without an incumbent: tried, not merged.** RENS reruns on the node LP,
+   on RINS's schedule, while there is no incumbent.
+   - **Tests:** a test that it runs, with a planted bug (trigger inverted: 0 runs) caught.
+   - **A/B, 60 s, on top of the conflict skip:** solved 12 → 12, solutions 53 → 54 (reblock115,
+     which the same base build had solved in the previous A/B, so noise), bound better on 10 and
+     worse on 7, mean 17.72% → 17.76%.
+   - **Why it fails:** its targets don't move (rococoC10 19.70% → 19.78%, csched007
+     15.59% → 15.62%).
+   - Local branch `claude/tree-rens2-wip`.
 4. **Later:** shifting heuristic and zi-round. Central rounding needs an interior-point
    solution, which we don't have, so it is out.
 
@@ -218,7 +222,7 @@ slack.
 | 2 | B continuous propagation | 6 h | bound A/B better ≥ worse, node rate within 10% |
 | 3 | C1–C3 presolve aggregator | 2–3 days | fewer columns, A/B, all presolve tests and differential tests |
 | 4 | D clique table | 1.5 days | targets move, no wrong answer |
-| 5 | A3 RENS in the tree | 3 h | solutions up |
+| done | A3 RENS in the tree | not merged (neutral, targets unmoved) | solutions up |
 | 6 | E inference branching | 4 h | A/B |
 | 7 | F zero-half cuts | 1 day | A/B, enlight_hard |
 | 8 | G symmetry | 3–4 days | targets move |

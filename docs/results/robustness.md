@@ -106,23 +106,20 @@ cliques. The last column is the result at 60 s.
 
 ## 5. Convex QP (Maros–Mészáros)
 
-A screening run on the 138 Maros–Mészáros convex QPs, with the interior-point method and 60 s
-per model:
-- **105 of 138 solved and verified** by `verify_qp_optimality`, which recomputes
-  d = c + Qx − A'y.
-- **0 wrong answers.**
-- VALUES is refused as not convex. Its Q has a negative eigenvalue (−1.27e-5, computed
-  independently with numpy); samaya's check factorizes Q + εI, and a nonpositive pivot means an
-  indefinite Q. HiGHS returns a point for VALUES.
-- **14** end in `numerical_error`: the interior point converged, but neither its point nor the
-  polished point passed the strict verifier. These are mostly the degenerate, LP-like
-  Q-versions of Netlib models (QSHIP*, QSCFXM*, QSHARE1B); a crossover would finish them.
-- **14** reach the iteration limit (the LISWET family and YAO), and **3** the time limit.
+The 138 Maros–Mészáros convex QPs, 300 s each, samaya's interior-point method against HiGHS 1.15
+(full page: [qp.md](qp.md)):
+- **samaya solves and verifies 106**, HiGHS solves 104. Every samaya optimum passed
+  `verify_qp_optimality`, which recomputes d = c + Qx − A'y.
+- **Wrong answers:** samaya 0; HiGHS 2. HiGHS reports "optimal" with a wrong objective on DPKLO1
+  (0.7125 vs 0.3701) and QBORE3D (3102.14 vs 3100.20); SCIP confirms samaya's values.
+- **Non-convex:** VALUES is refused by samaya: its Q has eigenvalue −1.27e-5, computed
+  independently with numpy.
+- **Unverified answers are not reported as optimal.** Where samaya's point failed the strict
+  verifier (mostly degenerate, LP-like models), it reports `numerical_error` instead.
 
-Infeasible QPs get a verified Farkas certificate from the simplex on their constraints. The
-same interior point solves LPs (`--lp-method barrier`): on Netlib, 71 of 93 answers are
+The same interior point solves LPs (`--lp-method barrier`): on Netlib, 71 of 93 answers are
 verified from the interior point alone and the dual simplex completes the other 22, all 93
-verified. The timed run against HiGHS's QP solver goes in [qp.md](qp.md).
+verified.
 
 ## How to reproduce
 

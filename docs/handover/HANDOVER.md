@@ -24,6 +24,38 @@ stands and how to continue it.
 Branch: `claude/kind-hamilton-jr2b6u`. The goal is to be better than HiGHS, the leading
 open-source solver, by honest means.
 
+## State on 27 September 2026, evening (IST)
+
+- **Commits since the handover note below:**
+  - 9343abf: continuous-column propagation (MILP).
+  - 457101d: interior point for convex QP and `--lp-method barrier`, on our own sparse LDLᵀ.
+  - b5dab94: conflict-pool skip.
+  - 670bab2: the teammate's WP1/WP2 (PDLP, GPU), fixed and integrated.
+  - f600682: MIQP.
+  - 8297b1e: a time limit in barrier or PDLP is final; fallbacks get only the remaining time.
+  - 687448b: PDLP restarts on the KKT error with a primal weight; `bench/gpu_lp.test`.
+- **Plans:**
+  - `docs/SIH_48H_PLAN.md`: the SIH submission work, with progress.
+  - `docs/SIH_GAP_PLAN.md`: the requirement gaps.
+  - `docs/IMPROVEMENT_PLAN.md`: MILP items, with what was tried and dropped.
+- **Results:**
+  - `docs/results/qp.md`: Maros–Mészáros, samaya 106/138 against HiGHS 104.
+  - `docs/results/robustness.md`.
+  - `docs/results/large_lp.md`: GPU against CPU on large LPs; filled from the night runs of
+    27–28 September.
+- **GPU on the laptop:** RTX 3050 6 GB. `sudo apt install nvidia-cuda-toolkit` gives CUDA 12.0
+  with its own GCC 12 host wrapper; then `cmake --preset cuda` (sm_86). WSL2 restarts clear
+  `/tmp`: keep logs in the home directory.
+- **Open items:**
+  - A crossover for barrier and PDLP. The degenerate LP-like QPs fail strict verification without
+    it.
+  - The LISWET family (slow interior-point steps).
+  - GPU-side evaluation of PDLP's residuals (the host evaluation limits the GPU on small LPs).
+  - The generated refinery LP (467,376 x 1,001,520, 4.1M nonzeros): GPU PDLP on the RTX 3050
+    stopped at its 600 s limit on 27 September (17:48 IST, a build of the work-in-progress
+    tree), unconverged. The night runs retry it at 1000 s with 687448b.
+  - The MILP items of IMPROVEMENT_PLAN (presolve aggregator, clique table).
+
 ## What is in the branch
 
 Recent MILP work, each item with tests and planted-bug checks (details in `docs/MILP_PLAN.md`):
