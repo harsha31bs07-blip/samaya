@@ -21,6 +21,8 @@ namespace {
 
 constexpr double kRayDropTolerance = 1e-12;
 
+}  // namespace
+
 // The model in computational form (minimization), scaled by `scaling`.
 LpProblem make_problem(const Model& model, const Scaling& scaling) {
   const Index m = model.num_rows();
@@ -46,6 +48,8 @@ LpProblem make_problem(const Model& model, const Scaling& scaling) {
   }
   return lp;
 }
+
+namespace {
 
 void add_stats(SimplexStats& total, const SimplexStats& s) {
   total.dual_iterations += s.dual_iterations;

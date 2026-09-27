@@ -32,13 +32,15 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(samaya_options INTERFACE)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  target_compile_options(samaya_options INTERFACE -Wall -Wextra -Wpedantic -Wshadow)
+  # C++ sources only: nvcc passes host flags to its own generated code, which -Wpedantic rejects.
+  target_compile_options(samaya_options INTERFACE
+    "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-Wshadow>")
   if(SAMAYA_WARNINGS_AS_ERRORS)
-    target_compile_options(samaya_options INTERFACE -Werror)
+    target_compile_options(samaya_options INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:-Werror>")
   endif()
   if(SAMAYA_SANITIZE)
     target_compile_options(samaya_options INTERFACE
-      -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all)
+      "$<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address,undefined;-fno-omit-frame-pointer;-fno-sanitize-recover=all>")
     target_link_options(samaya_options INTERFACE -fsanitize=address,undefined)
   endif()
 elseif(MSVC)
@@ -64,6 +66,7 @@ add_library(samaya
   src/linalg/ordering.cpp
   src/lp/ipm.cpp
   src/lp/lp_solver.cpp
+  src/lp/pdlp.cpp
   src/lp/simplex.cpp
   src/mip/branch_and_bound.cpp
   src/mip/cuts.cpp
@@ -87,6 +90,18 @@ target_compile_definitions(samaya PRIVATE SAMAYA_VERSION_STRING="${PROJECT_VERSI
 
 find_package(Threads REQUIRED)
 target_link_libraries(samaya PUBLIC Threads::Threads)
+
+if(SAMAYA_CUDA)
+  # GPU kernels for PDLP (WP2): our own SpMV and vector kernels, CUDA runtime only.
+  target_sources(samaya PRIVATE
+    src/gpu/device.cu
+    src/gpu/spmv.cu
+    src/gpu/vector_ops.cu
+    src/gpu/pdhg_core.cu
+  )
+  target_link_libraries(samaya PRIVATE CUDA::cudart)
+  target_compile_definitions(samaya PRIVATE SAMAYA_HAVE_CUDA)
+endif()
 
 if(SAMAYA_BUILD_CLI)
   add_subdirectory(apps/cli)

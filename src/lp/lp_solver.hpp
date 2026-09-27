@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "core/log.hpp"
+#include "linalg/scaling.hpp"
 #include "lp/simplex.hpp"
 #include "samaya/model.hpp"
 #include "samaya/params.hpp"
@@ -27,6 +28,10 @@ struct LpSolveOptions {
   bool scale = true;
   SimplexOptions simplex;
 };
+
+// The model in computational form (minimization), scaled by `scaling`:
+// min cost'v s.t. [A -I] v = 0, lower <= v <= upper. Used by solve_lp and by PDLP.
+LpProblem make_problem(const Model& model, const Scaling& scaling);
 
 // Solves the LP relaxation of `model` (integrality is ignored; Q must be empty) with the dual
 // simplex method.

@@ -7,6 +7,7 @@
 #include "core/log.hpp"
 #include "lp/ipm.hpp"
 #include "lp/lp_solver.hpp"
+#include "lp/pdlp.hpp"
 #include "mip/branch_and_bound.hpp"
 #include "presolve/presolve.hpp"
 #include "samaya/verify.hpp"
@@ -20,6 +21,8 @@ namespace samaya {
 const char* version() { return SAMAYA_VERSION_STRING; }
 
 namespace {
+
+constexpr double kPdlpTolerance = 1e-8;
 
 Status to_status(SimplexStatus s) {
   switch (s) {
@@ -277,12 +280,88 @@ void solve_qp_model(const Model& model, const Params& params, const Logger& log,
                    (lp.status == Status::kOptimal ? " (the constraints are feasible)" : "");
 }
 
+// LP by PDLP (--lp-method pdlp; on the GPU with --gpu when built with SAMAYA_CUDA). Returns false
+// when the caller should fall back to the dual simplex: PDLP stopped without an answer, or its
+// answer failed the strict verifier (first-order solutions are less accurate and there is no
+// crossover yet; ARCHITECTURE.md WP1 M4).
+bool solve_pdlp_lp(const Model& model, const Params& params, const Logger& log, Result& result) {
+  const Scaling scaled = compute_scaling(model.A);
+  const LpProblem scaled_lp = make_problem(model, scaled);
+  PdlpOptions pdlp_opts;
+  // PDLP's strict tolerance (ARCHITECTURE.md WP1 M5): at the simplex's 1e-7 a first-order
+  // method leaves objective errors near 1e-5; at 1e-8 its answers agree with the other engines.
+  pdlp_opts.tol = std::min(params.dual_feasibility_tol, kPdlpTolerance);
+  pdlp_opts.max_iterations = -1;  // Automatic, proportional to the problem size.
+  pdlp_opts.time_limit = params.time_limit;
+  pdlp_opts.use_gpu = params.use_gpu;
+  const PdlpResult pdlp_result = solve_pdlp(scaled_lp, pdlp_opts, log);
+  result.barrier_iterations = pdlp_result.iterations;
+
+  // Map the PDLP result (scaled, minimization) to the model.
+  LpResult lp;
+  lp.status = pdlp_result.status;
+  lp.iterations = pdlp_result.iterations;
+  lp.stats = pdlp_result.stats;
+  const Index n = model.num_cols();
+  const double sense = model.sense == ObjSense::kMaximize ? -1.0 : 1.0;
+  if (pdlp_result.x.size() == static_cast<std::size_t>(n + model.num_rows())) {
+    lp.col_value.assign(pdlp_result.x.begin(), pdlp_result.x.begin() + n);
+    lp.row_activity.assign(pdlp_result.x.begin() + n, pdlp_result.x.end());
+    lp.row_dual = pdlp_result.y;
+    scaled.unscale_cols(lp.col_value);
+    scaled.unscale_row_duals(lp.row_dual);
+    // PDLP's Lagrangian is c'x + y'(Ax - s), so its reduced costs are c + A'y: negate y for the
+    // convention d = c - A'y, and apply the objective sense.
+    for (double& y : lp.row_dual) y *= -sense;
+    lp.col_dual.assign(static_cast<std::size_t>(n), 0.0);
+    model.A.multiply_transpose(lp.row_dual, lp.col_dual);
+    long double objective = model.obj_offset;
+    for (Index j = 0; j < n; ++j) {
+      lp.col_dual[j] = model.obj[j] - lp.col_dual[j];
+      objective += static_cast<long double>(model.obj[j]) * lp.col_value[j];
+    }
+    lp.objective = static_cast<double>(objective);
+  }
+  if (lp.status == SimplexStatus::kInfeasible && !pdlp_result.dual_ray.empty()) {
+    lp.dual_ray = pdlp_result.dual_ray;
+    scaled.unscale_row_duals(lp.dual_ray);
+    for (double& y : lp.dual_ray) y *= sense;
+  } else if (lp.status == SimplexStatus::kUnbounded && !pdlp_result.primal_ray.empty()) {
+    lp.primal_ray = pdlp_result.primal_ray;
+    scaled.unscale_cols(lp.primal_ray);  // In the scaled space of x, like the solution.
+  }
+  const bool answered = lp.status == SimplexStatus::kOptimal ||
+                        lp.status == SimplexStatus::kInfeasible ||
+                        lp.status == SimplexStatus::kUnbounded;
+  const bool verified = answered && (!params.verify || verify_lp(model, lp, result));
+  if (!verified) {
+    log.log(1, "PDLP: %s%s; using the dual simplex", to_string(lp.status),
+            answered ? " failed verification" : "");
+    result.message.clear();
+    return false;
+  }
+  result.status = to_status(lp.status);
+  result.verified = params.verify;
+  result.message.clear();
+  result.col_value = std::move(lp.col_value);
+  result.row_activity = std::move(lp.row_activity);
+  if (lp.status == SimplexStatus::kOptimal) {
+    result.objective = lp.objective;
+    result.dual_bound = lp.objective;
+    result.row_dual = std::move(lp.row_dual);
+    result.col_dual = std::move(lp.col_dual);
+  }
+  result.infeasibility_certificate = std::move(lp.dual_ray);
+  result.unbounded_ray = std::move(lp.primal_ray);
+  return true;
+}
+
 void solve_lp_model(const Model& model, const Params& params, const Logger& log, Result& result) {
   if (params.lp_method == LpMethod::kBarrier && solve_barrier_lp(model, params, log, result)) {
     return;
   }
-  if (params.lp_method == LpMethod::kPdlp) {
-    log.log(1, "Requested LP method not available yet; using the dual simplex");
+  if (params.lp_method == LpMethod::kPdlp && solve_pdlp_lp(model, params, log, result)) {
+    return;
   }
   LpResult lp;
   long long iterations = 0;

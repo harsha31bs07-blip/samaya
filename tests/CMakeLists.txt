@@ -7,6 +7,7 @@ add_executable(samaya_tests
   test_main.cpp
   test_model_and_solver.cpp
   test_mps_reader.cpp
+  test_pdlp.cpp
   test_presolve.cpp
   test_qp.cpp
   test_scaling.cpp
@@ -18,6 +19,13 @@ target_link_libraries(samaya_tests PRIVATE samaya::samaya samaya_options)
 target_include_directories(samaya_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(samaya_tests PRIVATE
   SAMAYA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/instances")
+
+if(SAMAYA_CUDA)
+  # GPU tests need the CUDA runtime.
+  target_sources(samaya_tests PRIVATE test_gpu.cpp)
+  target_link_libraries(samaya_tests PRIVATE CUDA::cudart)
+  target_compile_definitions(samaya_tests PRIVATE SAMAYA_HAVE_CUDA)
+endif()
 
 add_test(NAME unit_tests COMMAND samaya_tests)
 
