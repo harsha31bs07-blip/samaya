@@ -215,6 +215,22 @@
     render();
     $("#main").scrollTop = 0;
   }
+  // New case: the settings page with every setting back to its default, and the drop area
+  // highlighted, so the click always shows that a fresh case starts.
+  const DEFAULTS = { timeLimit: 60, threads: 0, mipGap: 0.0001, lpMethod: "auto", presolve: true, gpu: false };
+  function newCase() {
+    state.selected = null;
+    state.compare = null;
+    state.rerun = null;
+    setOptions(Object.assign({ startDate: isoDate(tomorrow()) }, DEFAULTS));
+    render();
+    $("#main").scrollTop = 0;
+    const drop = $("#drop");
+    drop.classList.remove("attn");
+    void drop.offsetWidth;  // restart the highlight if it is still running
+    drop.classList.add("attn");
+    setTimeout(() => drop.classList.remove("attn"), 1400);
+  }
   function rerun() {
     const c = byId(state.rerun);
     state.rerun = null;
@@ -673,7 +689,7 @@
   const pick = () => send({ type: "pick" });
   $("#tb-open").addEventListener("click", pick);
   $("#browse-link").addEventListener("click", (e) => { e.preventDefault(); pick(); });
-  $("#tb-new").addEventListener("click", () => back(null));
+  $("#tb-new").addEventListener("click", newCase);
   $("#home-btn").addEventListener("click", () => back(null));
   $("#tb-rerun").addEventListener("click", () => back(byId(state.selected)));
   $("#tb-stop").addEventListener("click", () => { const c = byId(state.selected); if (c) send({ type: "cancel", id: c.id }); });
@@ -734,6 +750,7 @@
   window.studio = {
     select(tab) { state.tab = tab; render(); },
     home() { back(null); },
+    newCase,
     back() { back(byId(state.selected)); },
     rerun,
     compare() { compare(byId(state.selected) || state.cases.find((x) => x.status === "done")); },
