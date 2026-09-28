@@ -78,7 +78,12 @@ DeviceCsr upload_csr_of_transpose(const SparseMatrix& csc) {
   DeviceCsr d;
   d.rows = csc.cols();
   const auto start = csc.col_start();
-  std::vector<int> ptr(start.begin(), start.end());
+  // The device kernels index with 32-bit ints; a matrix too large for them stays on the CPU.
+  if (!start.empty() && start.back() > INT_MAX) {
+    throw std::runtime_error("matrix too large for the GPU kernels");
+  }
+  std::vector<int> ptr(start.size());
+  for (std::size_t k = 0; k < start.size(); ++k) ptr[k] = static_cast<int>(start[k]);
   d.ptr = upload(ptr.data(), ptr.size());
   d.idx = upload(csc.row_index().data(), csc.row_index().size());
   d.val = upload(csc.values().data(), csc.values().size());

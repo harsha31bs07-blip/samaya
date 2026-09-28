@@ -26,8 +26,13 @@ target_compile_definitions(samaya_tests PRIVATE
 if(SAMAYA_CUDA)
   # GPU tests need the CUDA runtime.
   target_sources(samaya_tests PRIVATE test_gpu.cpp)
-  target_link_libraries(samaya_tests PRIVATE CUDA::cudart)
-  target_compile_definitions(samaya_tests PRIVATE SAMAYA_HAVE_CUDA)
+  if(WIN32)
+    target_link_libraries(samaya_tests PRIVATE CUDA::cudart_static)
+  else()
+    target_link_libraries(samaya_tests PRIVATE CUDA::cudart)
+  endif()
+  target_compile_definitions(samaya_tests PRIVATE SAMAYA_HAVE_CUDA
+                             SAMAYA_CUDA_MIN_ARCH=${SAMAYA_CUDA_MIN_ARCH})
 endif()
 
 add_test(NAME unit_tests COMMAND samaya_tests)
@@ -39,6 +44,12 @@ if(SAMAYA_BUILD_CLI)
     ${CMAKE_CURRENT_SOURCE_DIR}/instances/tiny_lp.mps)
   set_tests_properties(cli_json PROPERTIES PASS_REGULAR_EXPRESSION
     "\"status\":\"optimal\",\"verified\":true,\"objective\":11[,.]")
+  add_test(NAME cli_gpu_info COMMAND samaya_cli --gpu-info)
+  if(SAMAYA_CUDA)
+    set_tests_properties(cli_gpu_info PROPERTIES PASS_REGULAR_EXPRESSION "^\\{\"cuda\":true,\"gpu\":")
+  else()
+    set_tests_properties(cli_gpu_info PROPERTIES PASS_REGULAR_EXPRESSION "^\\{\"cuda\":false,\"gpu\":null\\}")
+  endif()
   add_test(NAME cli_missing_file COMMAND samaya_cli /nonexistent.mps)
   set_tests_properties(cli_missing_file PROPERTIES WILL_FAIL TRUE)
   # The run report (cases/report.py): both formats on a generated MRPL case.

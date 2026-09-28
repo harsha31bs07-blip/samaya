@@ -51,11 +51,18 @@ ctest --preset release
 Presets: `debug` (warnings as errors), `release`, `asan` (AddressSanitizer + UBSan), `cuda`
 (reserved for the Phase 3 GPU kernels).
 
-**Windows (native, no WSL):** double-click `setup.bat`. It checks the PC (Visual Studio 2022
+**Download for Windows:** the ready-to-run package is on the
+[Releases page](https://github.com/harsha31bs07-blip/mrpl-pro/releases). Download
+`samaya-windows-<version>.zip`, extract it, and double-click `setup.bat`. It installs
+samaya Studio and the `samaya` command-line solver, with no build tools and no administrator
+rights needed. Requirements: 64-bit Windows 10 (1809 or later) or Windows 11. An NVIDIA GPU is
+optional: with driver 580 or newer, Studio can run PDLP on it.
+
+**Windows from source (native, no WSL):** double-click `setup.bat`. It checks the PC (Visual Studio 2022
 Build Tools, Python, the WebView2 Runtime), installs what is missing after asking, builds with
 MSVC, runs the tests and installs **samaya Studio**, the desktop app: drag and drop models, see
-verified results, download them as Excel. Presets `windows-debug`, `windows-release` and
-`windows-asan`. Details and the release package: [docs/WINDOWS.md](docs/WINDOWS.md).
+verified results, download them as Excel. Presets `windows-debug`, `windows-release`,
+`windows-asan` and `windows-cuda` (with the GPU kernels). Details and the release package: [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ## Usage
 

@@ -217,9 +217,33 @@ void project_box(const std::vector<double>& lower, const std::vector<double>& up
   }
 }
 
+PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, const Logger& log);
+
 }  // namespace
 
 PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Logger& log) {
+#ifdef SAMAYA_HAVE_CUDA
+  if (options.use_gpu) {
+    const Timer timer;
+    try {
+      return solve_pdlp_once(lp, options, log);
+    } catch (const std::exception& e) {
+      // The GPU failed during the solve (a driver reset, a lost device). Its iterate cannot be
+      // trusted, so PDLP starts again on the CPU, in the time that is left.
+      log.log(1, "pdlp: the GPU failed during the solve (%s); solving again on the CPU", e.what());
+      PdlpOptions cpu = options;
+      cpu.use_gpu = false;
+      if (cpu.time_limit < kInf) cpu.time_limit = std::max(0.0, cpu.time_limit - timer.seconds());
+      return solve_pdlp_once(lp, cpu, log);
+    }
+  }
+#endif
+  return solve_pdlp_once(lp, options, log);
+}
+
+namespace {
+
+PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, const Logger& log) {
   const int m = lp.m;
   const int n = lp.n;
   const int nt = n + m;
@@ -311,10 +335,21 @@ PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Log
 #ifdef SAMAYA_HAVE_CUDA
   std::unique_ptr<gpu::PdhgDevice> device;
   if (options.use_gpu) {
-    device = gpu::PdhgDevice::create(A_eq, At_eq, cost_eq, lower_eq, upper_eq);
-    log.log(1, "pdlp: %s",
-            device ? ("iterations on the GPU (" + gpu::device_name() + ")").c_str()
-                   : "no usable GPU, iterations on the CPU");
+    // A GPU that fails to start (out of memory, a driver problem) leaves the solve on the CPU.
+    std::string why;
+    try {
+      device = gpu::PdhgDevice::create(A_eq, At_eq, cost_eq, lower_eq, upper_eq);
+    } catch (const std::exception& e) {
+      device.reset();
+      why = e.what();
+    }
+    if (device) {
+      log.log(1, "pdlp: iterations on the GPU (%s)", gpu::device_name().c_str());
+    } else if (!why.empty()) {
+      log.log(1, "pdlp: the GPU could not start (%s), iterations on the CPU", why.c_str());
+    } else {
+      log.log(1, "pdlp: no usable GPU, iterations on the CPU");
+    }
   }
 #else
   if (options.use_gpu) log.log(1, "pdlp: built without CUDA, iterations on the CPU");
@@ -1071,4 +1106,5 @@ PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Log
   return result;
 }
 
+}  // namespace
 }  // namespace samaya

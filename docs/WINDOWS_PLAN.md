@@ -26,6 +26,11 @@ The owner asked for all of it by the morning of 28 September. What was built tha
   - A Linux–Windows equivalence run on 99 models, in `docs/results/windows.md`.
 - **W3, samaya Studio:** the WebView2 app with drag and drop, results in the app, Excel, CSV and
   solution export, the independent re-check, samples, light and dark themes.
+- **CUDA on Windows (added on 28 Sep):**
+  - the `windows-cuda` preset;
+  - a Compute setting in Studio (CPU or the NVIDIA GPU, for PDLP);
+  - `samaya --gpu-info`;
+  - fallback to the CPU on unsupported GPUs and on GPU errors (docs/results/windows.md).
 - **W4, setup:** `setup.bat` covers both the release package and building from source, with
   `/check`, `/yes` and `/uninstall`. `tools/windows/package.ps1` makes the release zip.
 
@@ -35,7 +40,6 @@ The owner asked for all of it by the morning of 28 September. What was built tha
 - **CI:** the GitHub Actions workflow (`.github/workflows/ci.yml`).
 - **An installer `.exe`:** a signed Inno Setup installer. For now the release is a zip with
   `setup.bat`.
-- **CUDA on Windows.**
 - **Reading `.mps.gz` directly.**
 
 **The acceptance criteria (§5), checked that night:**

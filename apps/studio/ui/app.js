@@ -10,7 +10,7 @@
   const host = window.chrome && window.chrome.webview ? window.chrome.webview : null;
   const TOL = 1e-6;  // the verifier's default tolerances (include/samaya/verify.hpp)
 
-  const state = { cases: [], selected: null, compare: null, rerun: null, nextId: 1, samples: [], gpu: false,
+  const state = { cases: [], selected: null, compare: null, rerun: null, nextId: 1, samples: [], gpu: null, cuda: false,
                   tab: "overview", filter: "" };
 
   // ---------------------------------------------------------------------------------------------
@@ -101,11 +101,11 @@
   function onHost(m) {
     switch (m.type) {
       case "init":
-        state.samples = m.samples || []; state.gpu = !!m.gpu;
-        $("#version").textContent = `samaya ${m.version || ""} · ${m.cores || "?"} cores${m.gpu ? " · NVIDIA GPU" : ""}`;
-        $("#gpu-note").textContent = m.gpu ? "An NVIDIA GPU was found: PDLP can run its iterations on it." : "";
+        state.samples = m.samples || []; state.version = `samaya ${m.version || ""} · ${m.cores || "?"} cores`;
+        $("#version").textContent = state.version;
         renderSamples();
         break;
+      case "gpu": setGpu(m.info || {}); break;
       case "picked": addCases(m.files || []); break;
       case "log": { const c = byId(m.id); if (c) { c.log.push(m.line); if (isShown(c)) appendLog(m.line); } break; }
       case "result":
@@ -162,7 +162,29 @@
       mipGap: Math.max(0, Number($("#opt-gap").value) || 0) / 100,
       lpMethod: $("#opt-method").value,
       presolve: $("#opt-presolve").checked,
+      gpu: $("#opt-compute").value === "gpu",
     };
+  }
+  // The GPU samaya.exe reported (--gpu-info). The GPU runs PDLP, so choosing it selects PDLP.
+  function setGpu(info) {
+    state.cuda = !!info.cuda;
+    state.gpu = info.gpu || null;
+    const opt = $("#opt-compute").querySelector('option[value="gpu"]');
+    opt.disabled = !state.gpu;
+    opt.textContent = state.gpu ? `GPU: ${state.gpu}` : "NVIDIA GPU (none found)";
+    if (!state.gpu && $("#opt-compute").value === "gpu") $("#opt-compute").value = "cpu";
+    $("#version").textContent = state.version + (state.gpu ? ` · ${state.gpu}` : "");
+    computeChanged();
+  }
+  function computeChanged() {
+    const gpu = $("#opt-compute").value === "gpu";
+    if (gpu) $("#opt-method").value = "pdlp";
+    $("#opt-method").disabled = gpu;
+    $("#gpu-hint").textContent = gpu
+      ? "For very large linear programs: PDLP, samaya’s first-order method, runs its iterations on the GPU. Small and medium models, like the samples, solve faster on the CPU; mixed-integer models always use the CPU. Every answer is verified the same way."
+      : state.gpu ? "An NVIDIA GPU is available for PDLP on very large linear programs."
+      : state.cuda ? "This samaya has the GPU kernels, but no usable NVIDIA GPU or driver was found; it runs on the CPU."
+      : "This samaya was built without the GPU kernels; it runs on the CPU.";
   }
   function setOptions(o) {
     $("#opt-start").value = o.startDate || isoDate(tomorrow());
@@ -171,12 +193,16 @@
     $("#opt-gap").value = +(o.mipGap * 100).toPrecision(6);
     $("#opt-method").value = o.lpMethod;
     $("#opt-presolve").checked = o.presolve;
+    $("#opt-compute").value = o.gpu && state.gpu ? "gpu" : "cpu";
+    computeChanged();
+    if (!o.gpu) $("#opt-method").value = o.lpMethod;
   }
   const METHOD = { auto: "automatic", dual: "dual simplex", primal: "primal simplex", barrier: "interior point", pdlp: "PDLP" };
   function settingsRows(o) {
     return [["Start date", o.startDate ? cellText(parseDate(o.startDate)) : "–"], ["Time limit", `${o.timeLimit} s`],
             ["Threads", o.threads ? String(o.threads) : "automatic"], ["MIP gap", `${+(o.mipGap * 100).toPrecision(6)} %`],
-            ["LP method", METHOD[o.lpMethod] || o.lpMethod], ["Presolve", o.presolve ? "on" : "off"]];
+            ["LP method", METHOD[o.lpMethod] || o.lpMethod], ["Presolve", o.presolve ? "on" : "off"],
+            ["Compute", o.gpu ? "NVIDIA GPU" : "CPU"]];
   }
   const settingsText = (o) => settingsRows(o).map(([k, v]) => `${k.toLowerCase()} ${v}`).join(", ");
 
@@ -221,6 +247,18 @@
     const queued = state.cases.filter((x) => x.status === "queued").length;
     $("#sb-state").textContent = solving ? `Solving ${solving.name}…${queued ? ` (${queued} queued)` : ""}` : "Ready";
   }
+  // Where PDLP's iterations ran, from samaya's log: [used, text].
+  function gpuUse(c) {
+    const log = (c.result && c.result.log) || c.log.join("\n");
+    if (/pdlp: the GPU failed during the solve/.test(log)) return [false, "CPU (the GPU failed during the solve; solved again on the CPU)"];
+    if (/pdlp: the GPU could not start/.test(log)) return [false, "CPU (the GPU could not start)"];
+    const m = /pdlp: iterations on the GPU \(([^)]*)\)/.exec(log);
+    if (m) return [true, `GPU: ${m[1]}`];
+    if (!c.options.gpu) return [false, "CPU"];
+    if (/pdlp: no usable GPU/.test(log)) return [false, "CPU (no usable GPU was found)"];
+    if (/pdlp: built without CUDA/.test(log)) return [false, "CPU (this samaya has no GPU kernels)"];
+    return [false, "CPU (the GPU runs PDLP for linear programs only)"];
+  }
   function caseMeta(c) {
     if (c.status === "solving") return ["run", `Solving… ${secs((performance.now() - c.started) / 1000)}`];
     if (c.status === "queued") return ["", "Queued"];
@@ -239,7 +277,7 @@
       const when = c.options.startDate ? ` · from ${dm(parseDate(c.options.startDate))}` : "";
       return `<div class="case-item ${active ? "active" : ""}" data-id="${c.id}" title="${esc(c.path)}\n${esc(settingsText(c.options))}">
         <span class="dot ${dot}"></span><div class="nm">${esc(c.name)}</div><div class="meta">${esc(meta)}</div>
-        <div class="meta">${esc((METHOD[c.options.lpMethod] || c.options.lpMethod) + when)}</div></div>`;
+        <div class="meta">${esc((METHOD[c.options.lpMethod] || c.options.lpMethod) + (c.options.gpu ? " on GPU" : "") + when)}</div></div>`;
     }).join("");
     box.querySelectorAll(".case-item").forEach((el) => el.addEventListener("click", () => {
       state.selected = Number(el.dataset.id); state.compare = null; state.rerun = null; state.tab = "overview"; render();
@@ -309,14 +347,14 @@
       ["Objective" + (R.sense ? ` (${R.sense})` : ""), num(s.objective), ""],
       ["Best bound", num(s.dual_bound), isFinite(gap) ? `gap ${(gap * 100).toFixed(3)} %` : ""],
       ["Horizon", span ? span[0] : "–", span ? span[1] : "no calendar for this model"],
-      ["Solve time", secs(s.solve_seconds), `read ${secs(s.read_seconds)}`],
+      ["Solve time", secs(s.solve_seconds), gpuUse(c)[0] ? "PDLP iterations on the GPU" : `read ${secs(s.read_seconds)}`],
       ["Model size", `${num(s.rows, 12)} × ${num(s.cols, 12)}`, `${num(s.nnz, 12)} nonzeros`],
       ["Integer variables", num(s.integers ?? 0, 12), `${s.class || ""} · ${num(s.nodes ?? 0, 12)} nodes`],
     ];
   }
   function donePage(c) {
     const s = c.result.summary || {}, [label, cls] = statusOf(s.status);
-    const tags = tag(label, cls) + (s.verified ? tag("Verified", "ok") : tag("Not verified", "bad"));
+    const tags = tag(label, cls) + (s.verified ? tag("Verified", "ok") : tag("Not verified", "bad")) + (gpuUse(c)[0] ? tag("GPU", "info") : "");
     const kpis = kpiCells(c).map(([l, v, sub]) => `<div class="kpi"><div class="l">${esc(l)}</div><div class="v" title="${esc(v)}">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
     const unit = periodUnit(s.name);
     const TABS = [["overview", "Overview"], ["plan", unit === "week" ? "Plan" : unit ? "Schedule" : "Results"], ["verification", "Verification"], ["solution", "Solution"], ["log", "Log"]];
@@ -367,6 +405,8 @@
         <tr><td>Type</td><td>${esc(s.class || "")}, ${esc(R.sense || "")}</td></tr>
         <tr><td>Rows · columns · nonzeros</td><td>${num(s.rows, 12)} · ${num(s.cols, 12)} · ${num(s.nnz, 12)}</td></tr>
         <tr><td>Simplex iterations · nodes</td><td>${num(s.simplex_iterations ?? 0, 12)} · ${num(s.nodes ?? 0, 12)}</td></tr>
+        ${s.barrier_iterations ? `<tr><td>${c.options.lpMethod === "pdlp" || gpuUse(c)[0] ? "PDLP" : "Interior-point"} iterations</td><td>${num(s.barrier_iterations, 12)}</td></tr>` : ""}
+        <tr><td>Computed on</td><td>${esc(gpuUse(c)[1])}</td></tr>
         ${settingsRows(c.options).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join("")}</tbody></table>`;
     return verdict(c) + `<div class="grid2">${panel("Verification", checkTable(checks(c).own.concat(checks(c).ind)) +
         `<div class="note">samaya’s verifier, then an independent re-check from the model file. Details in the Verification tab.</div>`)}
@@ -500,7 +540,9 @@
     line("Best bound", (c) => c.result.summary.dual_bound ?? "");
     line("Solve time (s)", (c) => Math.round((c.result.summary.solve_seconds ?? 0) * 1000) / 1000);
     line("Simplex iterations", (c) => c.result.summary.simplex_iterations ?? 0);
+    line("Interior-point or PDLP iterations", (c) => c.result.summary.barrier_iterations ?? 0);
     line("Branch-and-bound nodes", (c) => c.result.summary.nodes ?? 0);
+    line("Computed on", (c) => gpuUse(c)[1]);
     for (const [k] of settingsRows(base.options)) line(k, (c) => settingsRows(c.options).find((r) => r[0] === k)[1]);
     // The variables that differ most between the cases.
     const vals = list.map((c) => new Map(c.result.cols || []));
@@ -542,7 +584,7 @@
       ["Horizon", span ? `${span[0]} (${span[1]})` : ""],
       ["Solve time (s)", s.solve_seconds ?? ""], ["Rows", s.rows], ["Columns", s.cols], ["Nonzeros", s.nnz], ["Integer columns", s.integers ?? 0],
       ["Simplex iterations", s.simplex_iterations ?? 0], ["Branch-and-bound nodes", s.nodes ?? 0],
-      ...settingsRows(c.options), ["Exported", { dateTime: new Date() }]]]];
+      ...settingsRows(c.options), ["Computed on", gpuUse(c)[1]], ["Exported", { dateTime: new Date() }]]]];
     out.push(["Verification", [["Check", "Checked by", "Largest error", "Tolerance", "Passed"],
       ...own.map(([n, v, t]) => [n, "samaya verifier", v, t, v <= t ? "yes" : "no"]),
       ...ind.map(([n, v, t]) => [n, "samaya Studio re-check (from the model file)", v, t, v <= t ? "yes" : "no"])]]);
@@ -641,6 +683,7 @@
   $("#tb-sol").addEventListener("click", () => { const c = byId(state.selected); if (c) send({ type: "saveCopy", id: c.id, name: `${c.name}.sol` }); });
   $("#rerun-btn").addEventListener("click", rerun);
   $("#rerun-close").addEventListener("click", () => { state.rerun = null; render(); });
+  $("#opt-compute").addEventListener("change", computeChanged);
   $("#theme-btn").addEventListener("click", () => setTheme(document.documentElement.dataset.theme !== "dark"));
   document.addEventListener("keydown", (e) => {
     const c = byId(state.selected);
@@ -672,6 +715,7 @@
       samples: [{ name: "mrpl_crude_small.mps", label: "Crude receipt schedule", path: "samples\\mrpl_crude_small.mps" },
                 { name: "mrpl_plan_small.mps", label: "Refinery plan", path: "samples\\mrpl_plan_small.mps" },
                 { name: "mrpl_utility_small.mps", label: "Steam and power", path: "samples\\mrpl_utility_small.mps" }] }), 0);
+    if (msg.type === "ready") setTimeout(() => onHost({ type: "gpu", info: { cuda: true, gpu: demo.get("gpu") || null } }), 0);
     if (msg.type === "pick") onHost({ type: "picked", files: [{ name: "mrpl_crude_small.mps", path: M.path }] });
     if (msg.type === "solve") {
       const lines = String(M.log).split("\n");

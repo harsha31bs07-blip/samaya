@@ -19,7 +19,8 @@ for the current user, with no administrator rights needed:
 - The Microsoft Edge WebView2 Runtime, which Studio uses to draw its window. It is part of
   Windows 11 and current Windows 10; if it is missing, setup installs it through winget or
   Microsoft's signed installer.
-- An NVIDIA GPU, reported only. This release runs on the CPU.
+- An NVIDIA GPU. The release includes samaya's CUDA kernels for PDLP, with the CUDA runtime
+  built in, so only the NVIDIA driver is needed. Without a GPU the same programs run on the CPU.
 
 Studio is installed to `%LOCALAPPDATA%\Programs\samaya`, with shortcuts in the Start menu and
 on the desktop. The installer has three more modes:
@@ -44,6 +45,12 @@ result.
      and the utility case's hours are shown as calendar dates from there, in the charts, the
      tables and the Excel file.
    - Time limit, threads, MIP gap, LP method and presolve.
+   - **Compute:** CPU, or the NVIDIA GPU when Studio finds one (it asks `samaya.exe --gpu-info`
+     at start). The GPU runs PDLP, samaya's first-order method, so choosing it sets the LP method
+     to PDLP. It is meant for very large linear programs; small and medium models (like the
+     samples) solve faster on the CPU, and mixed-integer models always use the CPU. Each case
+     shows where it was computed (Overview, Case: "Computed on"), and a GPU tag when PDLP ran
+     on the GPU.
    - Verification is always on.
 3. **Results** appear in the app:
    - **Overview:** the status, whether the answer is verified, the objective, the bound and gap,
@@ -84,6 +91,8 @@ changes the colours; Studio keeps the choice.
 
 ```bat
 samaya.exe --json --solution plan.sol model.mps
+samaya.exe --lp-method pdlp --gpu model.mps     rem PDLP's iterations on the NVIDIA GPU
+samaya.exe --gpu-info                           rem {"cuda":true,"gpu":"NVIDIA GeForce ..."}
 samaya.exe --help
 ```
 

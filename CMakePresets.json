@@ -61,6 +61,16 @@
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded" }
     },
     {
+      "name": "windows-cuda",
+      "inherits": "windows-release",
+      "displayName": "Windows (MSVC) Release + CUDA",
+      "cacheVariables": {
+        "SAMAYA_CUDA": "ON",
+        "CMAKE_CUDA_ARCHITECTURES": "75;86;89",
+        "CMAKE_CUDA_RUNTIME_LIBRARY": "Static"
+      }
+    },
+    {
       "name": "windows-asan",
       "inherits": "windows-base",
       "displayName": "Windows (MSVC) + ASan",
@@ -74,6 +84,7 @@
     { "name": "cuda", "configurePreset": "cuda" },
     { "name": "windows-debug", "configurePreset": "windows-debug" },
     { "name": "windows-release", "configurePreset": "windows-release" },
+    { "name": "windows-cuda", "configurePreset": "windows-cuda" },
     { "name": "windows-asan", "configurePreset": "windows-asan" }
   ],
   "testPresets": [
@@ -83,6 +94,7 @@
     { "name": "cuda", "configurePreset": "cuda", "output": { "outputOnFailure": true } },
     { "name": "windows-debug", "configurePreset": "windows-debug", "output": { "outputOnFailure": true } },
     { "name": "windows-release", "configurePreset": "windows-release", "output": { "outputOnFailure": true } },
+    { "name": "windows-cuda", "configurePreset": "windows-cuda", "output": { "outputOnFailure": true } },
     { "name": "windows-asan", "configurePreset": "windows-asan", "output": { "outputOnFailure": true } }
   ]
 }

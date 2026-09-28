@@ -71,6 +71,18 @@ TEST(model_stats_ranges) {
   CHECK(out.str().find("MILP") != std::string::npos);
 }
 
+// gpu_info() reports what this build has: CUDA kernels only with SAMAYA_CUDA, and a device name
+// only when it has them (the name itself depends on the machine).
+TEST(gpu_info_matches_the_build) {
+  const samaya::GpuInfo info = samaya::gpu_info();
+#ifdef SAMAYA_HAVE_CUDA
+  CHECK(info.built_with_cuda);
+#else
+  CHECK(!info.built_with_cuda);
+  CHECK(info.device.empty());
+#endif
+}
+
 TEST(solver_reports_invalid_and_unimplemented) {
   samaya::Params params;
   params.log_level = 0;

@@ -2,15 +2,18 @@
 # It holds the prebuilt apps (static MSVC runtime, so nothing else to install), the page, the
 # sample refinery cases, setup.bat and a README.
 #
-#   powershell -ExecutionPolicy Bypass -File tools\windows\package.ps1 [-SkipBuild]
-param([switch]$SkipBuild)
+# The default preset, windows-cuda, adds samaya's CUDA kernels for PDLP with the CUDA runtime
+# linked in: on a PC without an NVIDIA GPU or driver the same programs run on the CPU.
+#
+#   powershell -ExecutionPolicy Bypass -File tools\windows\package.ps1 [-Preset windows-cuda] [-SkipBuild]
+param([string]$Preset = 'windows-cuda', [switch]$SkipBuild)
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $SkipBuild) {
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'build.ps1') -Preset windows-release -Test
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'build.ps1') -Preset $Preset -Test
   if ($LASTEXITCODE -ne 0) { throw 'Build or tests failed.' }
 }
-$build = Join-Path $Root 'build\windows-release\apps\studio'
+$build = Join-Path $Root "build\$Preset\apps\studio"
 $version = (& (Join-Path $build 'samaya.exe') --version) -replace '^samaya\s+', ''
 $dist = Join-Path $Root 'dist\samaya-windows'
 Remove-Item -Recurse -Force $dist -ErrorAction SilentlyContinue

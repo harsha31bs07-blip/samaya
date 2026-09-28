@@ -173,7 +173,7 @@ try {
     if ($py) { Ok "$($py.Version) (sample cases and reports)" } else { Missing 'Python 3.9 or later (sample cases and reports; about 100 MB)'; $todo += 'python' }
   }
   $gpu = Get-NvidiaGpu
-  if ($gpu) { Ok "GPU: $gpu (GPU PDLP needs a CUDA build of samaya; this release runs on the CPU)" } else { Say '  [info]    no NVIDIA GPU found; samaya runs on the CPU' }
+  if ($gpu) { Ok "GPU: $gpu (samaya Studio can run PDLP on it: Settings, Compute)" } else { Say '  [info]    no NVIDIA GPU found; samaya runs on the CPU' }
 
   if ($CheckOnly) {
     Say ''

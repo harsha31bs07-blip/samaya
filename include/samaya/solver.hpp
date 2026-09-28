@@ -57,4 +57,12 @@ class Solver {
 // Semantic version of the library, e.g. "0.1.0".
 const char* version();
 
+// The GPU samaya can use for PDLP (Params::use_gpu): whether this build has the CUDA kernels, and
+// the name of the NVIDIA GPU it would run on (empty when there is no usable GPU or driver).
+struct GpuInfo {
+  bool built_with_cuda = false;
+  std::string device;
+};
+GpuInfo gpu_info();
+
 }  // namespace samaya

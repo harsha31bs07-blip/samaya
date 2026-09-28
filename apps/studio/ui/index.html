@@ -79,12 +79,14 @@
           <div><select id="opt-method"><option value="auto">Automatic</option><option value="dual">Dual simplex</option>
             <option value="primal">Primal simplex</option><option value="barrier">Interior point (barrier)</option>
             <option value="pdlp">PDLP (first-order)</option></select></div>
+          <label for="opt-compute">Compute</label>
+          <div><select id="opt-compute"><option value="cpu">CPU</option><option value="gpu" disabled>NVIDIA GPU</option></select>
+            <div class="hint" id="gpu-hint">Looking for an NVIDIA GPU…</div></div>
           <label for="opt-presolve">Presolve</label>
           <div><label class="check"><input id="opt-presolve" type="checkbox" checked> On</label></div>
           <label>Verification</label>
           <div class="fixed" title="Every result is verified; this cannot be turned off.">Always on</div>
         </div>
-        <div class="hint" id="gpu-note"></div>
       </div>
     </div>
   </section>

@@ -26,6 +26,15 @@ option(SAMAYA_CUDA "Enable CUDA kernels (PDLP, SpMV); lands in Phase 3" OFF)
 if(SAMAYA_CUDA)
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
+  # The oldest architecture in CMAKE_CUDA_ARCHITECTURES (e.g. "75;86;89" -> 75): GPUs older than
+  # this cannot run the kernels, so samaya reports them as unusable. 0 for "native" or "all".
+  set(SAMAYA_CUDA_MIN_ARCH 0)
+  foreach(arch IN LISTS CMAKE_CUDA_ARCHITECTURES)
+    string(REGEX MATCH "^[0-9]+" arch_number "${arch}")
+    if(arch_number AND (SAMAYA_CUDA_MIN_ARCH EQUAL 0 OR arch_number LESS SAMAYA_CUDA_MIN_ARCH))
+      set(SAMAYA_CUDA_MIN_ARCH ${arch_number})
+    endif()
+  endforeach()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -83,6 +92,7 @@ add_library(samaya
   src/lp/lp_solver.cpp
   src/lp/pdlp.cpp
   src/lp/simplex.cpp
+  src/gpu/info.cpp
   src/mip/branch_and_bound.cpp
   src/mip/cuts.cpp
   src/mip/heuristics.cpp
@@ -115,8 +125,18 @@ if(SAMAYA_CUDA)
     src/gpu/vector_ops.cu
     src/gpu/pdhg_core.cu
   )
-  target_link_libraries(samaya PRIVATE CUDA::cudart)
-  target_compile_definitions(samaya PRIVATE SAMAYA_HAVE_CUDA)
+  # Windows: the CUDA runtime linked in, so a user needs only the NVIDIA driver (no cudart DLL).
+  if(WIN32)
+    target_link_libraries(samaya PRIVATE CUDA::cudart_static)
+  else()
+    target_link_libraries(samaya PRIVATE CUDA::cudart)
+  endif()
+  target_compile_definitions(samaya PRIVATE SAMAYA_HAVE_CUDA
+                             SAMAYA_CUDA_MIN_ARCH=${SAMAYA_CUDA_MIN_ARCH})
+  if(MSVC)
+    # CUDA 13's headers (CCCL) require MSVC's standard-conforming preprocessor.
+    target_compile_options(samaya PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>")
+  endif()
 endif()
 
 if(SAMAYA_BUILD_CLI)

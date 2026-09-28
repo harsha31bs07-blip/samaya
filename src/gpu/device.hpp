@@ -22,12 +22,26 @@ __inline__ __device__ double warp_reduce_sum(double val) {
 }
 #endif
 
-// Returns true if a CUDA-capable GPU is available.
+// The oldest GPU architecture this build has kernels for (compute capability x 10, from
+// CMAKE_CUDA_ARCHITECTURES); an older GPU cannot run them. 0: no limit known.
+#ifndef SAMAYA_CUDA_MIN_ARCH
+#define SAMAYA_CUDA_MIN_ARCH 0
+#endif
+
+// Returns true if a CUDA GPU is available that can run this build's kernels: a driver new enough
+// for the CUDA runtime, and a GPU at least as new as SAMAYA_CUDA_MIN_ARCH. Older GPUs (for example
+// Pascal cards with a CUDA 13 build) are reported as unavailable, so PDLP runs on the CPU.
 inline bool gpu_available() {
 #ifdef SAMAYA_HAVE_CUDA
   int count = 0;
-  cudaError_t err = cudaGetDeviceCount(&count);
-  return err == cudaSuccess && count > 0;
+  if (cudaGetDeviceCount(&count) != cudaSuccess || count <= 0) return false;
+  int device = 0, major = 0, minor = 0;
+  if (cudaGetDevice(&device) != cudaSuccess ||
+      cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device) != cudaSuccess ||
+      cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device) != cudaSuccess) {
+    return false;
+  }
+  return 10 * major + minor >= SAMAYA_CUDA_MIN_ARCH;
 #else
   return false;
 #endif

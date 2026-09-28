@@ -74,7 +74,10 @@ void print_usage(std::FILE* out) {
                "  --mip-gap <gap>       Relative MIP gap tolerance\n"
                "  --lp-method <m>       auto | dual | primal | barrier | pdlp | concurrent\n"
                "  --no-presolve         Disable presolve\n"
-               "  --gpu                 Use GPU kernels when available\n"
+               "  --gpu                 Run PDLP's iterations on an NVIDIA GPU when available\n"
+               "                        (with --lp-method pdlp; the CPU otherwise)\n"
+               "  --gpu-info            Print, as JSON, whether this build has CUDA and which GPU\n"
+               "                        it would use, and exit\n"
                "  --log-level <0-3>     Verbosity (default 1)\n"
                "  --version             Print the version and exit\n"
                "  --help                Print this message and exit\n");
@@ -243,6 +246,11 @@ int main(int argc, char** argv) {
     if (arg == "--help" || arg == "-h") {
       print_usage(stdout);
       return kExitOk;
+    } else if (arg == "--gpu-info") {
+      const samaya::GpuInfo gpu = samaya::gpu_info();
+      std::printf("{\"cuda\":%s,\"gpu\":%s}\n", gpu.built_with_cuda ? "true" : "false",
+                  gpu.device.empty() ? "null" : json_string(gpu.device).c_str());
+      return kExitOk;
     } else if (arg == "--version") {
       std::printf("samaya %s\n", samaya::version());
       return kExitOk;
@@ -334,7 +342,8 @@ int main(int argc, char** argv) {
         "{\"instance\":%s,\"name\":%s,\"class\":\"%s\",\"rows\":%d,\"cols\":%d,\"nnz\":%lld,"
         "\"integers\":%d,\"status\":\"%s\",\"verified\":%s,\"objective\":%s,"
         "\"dual_bound\":%s,\"max_primal_violation\":%s,\"max_dual_violation\":%s,"
-        "\"simplex_iterations\":%lld,\"read_seconds\":%s,\"solve_seconds\":%s,\"nodes\":%lld,"
+        "\"simplex_iterations\":%lld,\"barrier_iterations\":%lld,\"read_seconds\":%s,"
+        "\"solve_seconds\":%s,\"nodes\":%lld,"
         "\"message\":%s}\n",
         json_string(path).c_str(), json_string(model.name).c_str(),
         samaya::to_string(model.problem_class()), stats.rows, stats.cols,
@@ -342,6 +351,7 @@ int main(int argc, char** argv) {
         result.verified ? "true" : "false", json_number(result.objective).c_str(),
         json_number(result.dual_bound).c_str(), json_number(result.max_primal_violation).c_str(),
         json_number(result.max_dual_violation).c_str(), result.simplex_iterations,
+        result.barrier_iterations,
         json_number(read_seconds).c_str(), json_number(result.solve_seconds).c_str(),
         result.nodes, json_string(result.message).c_str());
   }

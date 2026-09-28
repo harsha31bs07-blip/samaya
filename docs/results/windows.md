@@ -63,3 +63,37 @@ The test results for the commit are in its message.
 - **`setup.bat /check`:**
   - From the release package, it found Windows 11, the WebView2 Runtime 153 and the RTX 3050.
   - From the source tree, it also found winget, the Build Tools and Python 3.13.
+
+## The GPU build (windows-cuda)
+
+- **Toolchain:** CUDA Toolkit 13.4 with MSVC 19.44. Kernels are built for Turing, Ampere and Ada
+  (`75;86;89`, with PTX so that newer GPUs compile them at first use). The CUDA runtime is linked
+  in, so a user needs only the NVIDIA driver (580 or newer). The release zip is this build.
+- **Two build problems fixed:**
+  - nvcc fails without a message when TEMP contains a space (a user folder such as
+    `C:\Users\HARSHA B S`); `tools/windows/build.ps1` gives it a short path.
+  - CUDA 13's headers need MSVC's conforming preprocessor (`/Zc:preprocessor` for CUDA sources).
+- **Tests:** all 6 test groups pass on the RTX 3050, including GPU against CPU PDLP on 13 LPs
+  and `cli_gpu_info`.
+- **Safe without a usable GPU:**
+  - A GPU older than the oldest built architecture, or a driver too old for the runtime, is
+    reported as unusable, and PDLP runs on the CPU.
+  - A GPU error during a solve makes PDLP start again on the CPU in the time left.
+  - Both were checked by making the RTX 3050 look unsupported (a build for `sm_89` only). Before
+    the fix the solve aborted with "no kernel image is available"; after it, the solve fell back
+    to the CPU and ended optimal and verified.
+- **Time on the MRPL samples** (PDLP, RTX 3050 laptop GPU against the same laptop's CPU; one
+  run each):
+
+  | Model | Size | GPU | CPU | Objective (both) |
+  |---|---|---:|---:|---:|
+  | mrpl_plan_small | 240 × 316 | 7.18 s | 0.44 s | 933,184.6945, verified |
+  | mrpl_plan_medium | 806 × 1,105 | 10.24 s | 2.11 s | 3,129,504.3963, verified |
+
+  These models are small, and PDLP takes 140,000 to 190,000 iterations on them. The GPU pays a
+  launch cost on every iteration, so the CPU is faster here, and Studio says so next to the
+  Compute setting.
+- **What the GPU is for:** very large LPs, where each iteration has enough work for the GPU. The
+  benchmark that measures this (`bench/gpu_lp.test`, 14 LPs up to 8.6 million columns, fixed on
+  27 Sep) has not been run yet.
+

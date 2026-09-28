@@ -205,6 +205,53 @@ void samples_json(std::string& out) {
   out += "]";
 }
 
+// The GPU ---------------------------------------------------------------------------------------
+// Asks samaya.exe which GPU it can use (--gpu-info) and tells the page. Off the UI thread: the
+// CUDA runtime takes a moment to start.
+void detect_gpu() {
+  std::thread([]() {
+    std::string answer = "{\"cuda\":false,\"gpu\":null}";
+    const fs::path exe = g.exe_dir / L"samaya.exe";
+    std::wstring cmd = L"\"" + exe.wstring() + L"\" --gpu-info";
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE read_end = nullptr, write_end = nullptr;
+    if (CreatePipe(&read_end, &write_end, &sa, 0)) {
+      SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+      STARTUPINFOW si{};
+      si.cb = sizeof si;
+      si.dwFlags = STARTF_USESTDHANDLES;
+      si.hStdOutput = write_end;
+      si.hStdError = write_end;
+      PROCESS_INFORMATION pi{};
+      std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+      buf.push_back(L'\0');
+      const BOOL started = CreateProcessW(nullptr, buf.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
+                                          g.exe_dir.c_str(), &si, &pi);
+      CloseHandle(write_end);
+      if (started) {
+        AssignProcessToJobObject(g.job_object, pi.hProcess);
+        std::string out;
+        char chunk[512];
+        DWORD got = 0;
+        while (ReadFile(read_end, chunk, sizeof chunk, &got, nullptr) && got > 0) out.append(chunk, got);
+        WaitForSingleObject(pi.hProcess, 10000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        try {
+          const studio::Json info = studio::parse_json(out.substr(0, out.find('\n')));
+          const studio::Json* name = info.get("gpu");
+          answer = std::string("{\"cuda\":") + (info.flag("cuda", false) ? "true" : "false") + ",\"gpu\":" +
+                   (name && name->kind == studio::Json::kString ? studio::json_string(name->string) : "null") + "}";
+        } catch (const std::exception&) {
+          // An older samaya.exe without --gpu-info: no GPU.
+        }
+      }
+      CloseHandle(read_end);
+    }
+    post_to_page("{\"type\":\"gpu\",\"info\":" + answer + "}");
+  }).detach();
+}
+
 // Solving ---------------------------------------------------------------------------------------
 std::wstring quote(const std::wstring& s) { return L"\"" + s + L"\""; }
 
@@ -227,6 +274,7 @@ void solve(long long id, const std::string& model, const studio::Json& options) 
   cmd += L" --mip-gap " + widen(studio::json_number(options.num("mipGap", 1e-4)));
   cmd += L" --lp-method " + widen(method);
   if (!options.flag("presolve", true)) cmd += L" --no-presolve";
+  if (options.flag("gpu", false)) cmd += L" --gpu";  // PDLP's iterations on the NVIDIA GPU
   cmd += L" " + quote(widen(model));
 
   SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
@@ -384,6 +432,7 @@ void on_message(ICoreWebView2WebMessageReceivedEventArgs* args) {
     post_to_page_now("{\"type\":\"init\",\"version\":" + studio::json_string(SAMAYA_VERSION_STRING) +
                      ",\"cores\":" + std::to_string(std::thread::hardware_concurrency()) +
                      ",\"gpu\":false,\"samples\":" + samples + "}");
+    detect_gpu();
     if (!g.capture_run.empty()) {
       post_to_page_now("{\"type\":\"picked\",\"files\":" + files_json({widen(g.capture_run)}) + "}");
     } else if (!g.capture_png.empty()) {
