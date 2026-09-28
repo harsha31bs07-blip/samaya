@@ -29,8 +29,8 @@ a recent driver and the CUDA 12 toolkit (`nvcc --version`).
 ## Step 1: clone, build, run the tests
 
 ```sh
-git clone https://github.com/harsha31bs07-blip/mrpl-pro.git
-cd mrpl-pro
+git clone https://github.com/harsha31bs07-blip/samaya.git
+cd samaya
 cmake --preset release && cmake --build --preset release && ctest --preset release
 ```
 

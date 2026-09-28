@@ -1,13 +1,13 @@
 # samaya
 
-[![Download samaya for Windows](https://img.shields.io/badge/Download-samaya%20for%20Windows%20(v0.1.0)-1F4E80?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/harsha31bs07-blip/mrpl-pro/releases/latest/download/samaya-windows-0.1.0.zip)
-[![Release notes](https://img.shields.io/badge/Release-v0.1.0%20notes-3F8A5A?style=for-the-badge)](https://github.com/harsha31bs07-blip/mrpl-pro/releases/latest)
+[![Download samaya for Windows](https://img.shields.io/badge/Download-samaya%20for%20Windows%20(v0.1.0)-1F4E80?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/harsha31bs07-blip/samaya/releases/latest/download/samaya-windows-0.1.0.zip)
+[![Release notes](https://img.shields.io/badge/Release-v0.1.0%20notes-3F8A5A?style=for-the-badge)](https://github.com/harsha31bs07-blip/samaya/releases/latest)
 
-> **Download: [samaya-windows-0.1.0.zip](https://github.com/harsha31bs07-blip/mrpl-pro/releases/latest/download/samaya-windows-0.1.0.zip)**
+> **Download: [samaya-windows-0.1.0.zip](https://github.com/harsha31bs07-blip/samaya/releases/latest/download/samaya-windows-0.1.0.zip)**
 > (Windows 10/11, 64-bit). Extract it and double-click `setup.bat`. It installs **samaya Studio**,
 > the desktop app, and the `samaya` command-line solver, with no build tools or admin rights.
 > An NVIDIA GPU is optional. Install steps and requirements:
-> [Releases](https://github.com/harsha31bs07-blip/mrpl-pro/releases/latest).
+> [Releases](https://github.com/harsha31bs07-blip/samaya/releases/latest).
 
 A sovereign LP / MILP / QP optimization solver core, built from mathematical foundations for
 SIH problem statement 26119 (MRPL). No external solver library is used. See [PLAN.md](PLAN.md)
@@ -61,7 +61,7 @@ Presets: `debug` (warnings as errors), `release`, `asan` (AddressSanitizer + UBS
 (reserved for the Phase 3 GPU kernels).
 
 **Download for Windows:** the ready-to-run package is on the
-[Releases page](https://github.com/harsha31bs07-blip/mrpl-pro/releases). Download
+[Releases page](https://github.com/harsha31bs07-blip/samaya/releases). Download
 `samaya-windows-<version>.zip`, extract it, and double-click `setup.bat`. It installs
 samaya Studio and the `samaya` command-line solver, with no build tools and no administrator
 rights needed. Requirements: 64-bit Windows 10 (1809 or later) or Windows 11. An NVIDIA GPU is

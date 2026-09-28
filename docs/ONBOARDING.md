@@ -18,10 +18,10 @@ Budget about an hour for part B, most of it downloads.
 
 1. The teammate creates a free account at <https://github.com/signup> and sends you their
    **GitHub username**.
-2. Open <https://github.com/harsha31bs07-blip/mrpl-pro/settings/access>. Choose **Add people**,
+2. Open <https://github.com/harsha31bs07-blip/samaya/settings/access>. Choose **Add people**,
    enter the username, and give the **Write** role.
 3. The teammate accepts the invite from the email or from
-   <https://github.com/harsha31bs07-blip/mrpl-pro/invitations>.
+   <https://github.com/harsha31bs07-blip/samaya/invitations>.
 4. Recommended, so nobody pushes to `main` directly:
    - Go to **Settings → Branches → Add branch ruleset** (or "Add rule") for `main`.
    - Tick **Require a pull request before merging** and **Require status checks to pass**,
@@ -111,8 +111,8 @@ git config --global pull.rebase true
 
 ```sh
 mkdir -p ~/code && cd ~/code
-gh repo clone harsha31bs07-blip/mrpl-pro
-cd mrpl-pro
+gh repo clone harsha31bs07-blip/samaya
+cd samaya
 
 cmake --preset release            # configure (once)
 cmake --build --preset release    # compile, about 1 minute
