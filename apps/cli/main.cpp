@@ -74,6 +74,8 @@ void print_usage(std::FILE* out) {
                "  --mip-gap <gap>       Relative MIP gap tolerance\n"
                "  --lp-method <m>       auto | dual | primal | barrier | pdlp | concurrent\n"
                "  --no-presolve         Disable presolve\n"
+               "  --crossover           After barrier or PDLP, report a basic (vertex) solution:\n"
+               "                        crossover to the simplex, then verify\n"
                "  --gpu                 Run PDLP's iterations on an NVIDIA GPU when available\n"
                "                        (with --lp-method pdlp; the CPU otherwise)\n"
                "  --gpu-info            Print, as JSON, whether this build has CUDA and which GPU\n"
@@ -276,6 +278,8 @@ int main(int argc, char** argv) {
       }
     } else if (arg == "--no-presolve") {
       params.presolve = false;
+    } else if (arg == "--crossover") {
+      params.crossover = true;
     } else if (arg == "--gpu") {
       params.use_gpu = true;
     } else if (arg == "--log-level") {
@@ -342,7 +346,8 @@ int main(int argc, char** argv) {
         "{\"instance\":%s,\"name\":%s,\"class\":\"%s\",\"rows\":%d,\"cols\":%d,\"nnz\":%lld,"
         "\"integers\":%d,\"status\":\"%s\",\"verified\":%s,\"objective\":%s,"
         "\"dual_bound\":%s,\"max_primal_violation\":%s,\"max_dual_violation\":%s,"
-        "\"simplex_iterations\":%lld,\"barrier_iterations\":%lld,\"read_seconds\":%s,"
+        "\"simplex_iterations\":%lld,\"barrier_iterations\":%lld,\"crossover\":%s,"
+        "\"read_seconds\":%s,"
         "\"solve_seconds\":%s,\"nodes\":%lld,"
         "\"message\":%s}\n",
         json_string(path).c_str(), json_string(model.name).c_str(),
@@ -351,7 +356,7 @@ int main(int argc, char** argv) {
         result.verified ? "true" : "false", json_number(result.objective).c_str(),
         json_number(result.dual_bound).c_str(), json_number(result.max_primal_violation).c_str(),
         json_number(result.max_dual_violation).c_str(), result.simplex_iterations,
-        result.barrier_iterations,
+        result.barrier_iterations, result.crossover ? "true" : "false",
         json_number(read_seconds).c_str(), json_number(result.solve_seconds).c_str(),
         result.nodes, json_string(result.message).c_str());
   }

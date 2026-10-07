@@ -13,6 +13,7 @@
 #           miplib600-samaya  samaya alone on the 600 s set (same instance-to-shard split)
 #           maros          Maros-Meszaros convex QP (138), 300 s, samaya and HiGHS
 #           netlib-barrier Netlib LP (93), 300 s, samaya with --lp-method barrier alone
+#           netlib-crossover  Netlib LP (93), 300 s, samaya with --lp-method barrier --crossover
 #           mittelmann     Mittelmann LP subset (13, bench/mittelmann_lp.test), 1000 s, samaya
 #                          and HiGHS
 #   SHARDS  instances run at the same time (default 4; keep SHARDS x threads <= cores)
@@ -81,6 +82,12 @@ case "${set_name}" in
     limit=300
     baselines=()
     samaya="bench/samaya_barrier.sh"
+    ;;
+  netlib-crossover)
+    files=(bench/instances/netlib/*.mps*)
+    limit=300
+    baselines=()
+    samaya="bench/samaya_crossover.sh"
     ;;
   *)
     echo "unknown set: ${set_name}" >&2

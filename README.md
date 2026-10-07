@@ -31,6 +31,7 @@ packages (PDLP, GPU, barrier, QP, case studies). New to the project? Start with
 | Independent verifier: optimality, Farkas certificates, unbounded rays | done |
 | LP presolve + postsolve (primal and dual), verified on the original model | done |
 | Barrier (interior point) for LP and convex QP; PDLP on the CPU and on NVIDIA GPUs (own CUDA kernels) | done |
+| Crossover from barrier or PDLP to a verified basic solution (`--crossover`) | done |
 | Hyper-sparse solves | planned |
 | MILP branch-and-bound: warm-started dual simplex, propagation, reliability branching, plunging, rounding heuristics | done |
 | Root cutting planes: Gomory mixed-integer, c-MIR, lifted knapsack covers | done |

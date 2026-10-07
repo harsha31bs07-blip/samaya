@@ -34,6 +34,10 @@ struct Params {
   LpMethod lp_method = LpMethod::kAuto;
   bool presolve = true;
   bool use_gpu = false;
+  // After barrier or PDLP: turn the answer into a basic (vertex) solution by crossover and the
+  // simplex, and report that. Off: the interior point is reported when it verifies. A point that
+  // fails verification goes to the simplex from the crossover basis either way.
+  bool crossover = false;
 
   // Independently re-check every solution before reporting it.
   bool verify = true;

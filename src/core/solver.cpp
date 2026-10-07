@@ -6,6 +6,7 @@
 
 #include "core/log.hpp"
 #include "core/xreal.hpp"
+#include "lp/crossover.hpp"
 #include "lp/ipm.hpp"
 #include "lp/lp_solver.hpp"
 #include "lp/pdlp.hpp"
@@ -65,9 +66,11 @@ bool verify_lp(const Model& model, const LpResult& lp, Result& result) {
 // with tighter tolerances and then without scaling. Returns the last outcome; `verified` says
 // whether it passed (limit statuses claim nothing and count as verified).
 LpResult solve_lp_verified(const Model& model, const Params& params, const Logger& log,
-                           Result& result, bool& verified) {
+                           Result& result, bool& verified,
+                           const std::vector<VarStatus>& start = {}) {
   LpSolveOptions attempts[3];
   attempts[0] = lp_options_from_params(params);
+  attempts[0].start = start;
   attempts[1] = attempts[0];
   attempts[1].simplex.primal_tol = std::min(attempts[1].simplex.primal_tol, 1e-9);
   attempts[1].simplex.dual_tol = std::min(attempts[1].simplex.dual_tol, 1e-9);
@@ -180,9 +183,10 @@ void fill_continuous_optimum(const Model& model, std::vector<double> x, std::vec
 
 // LP by the interior-point method (--lp-method barrier). Returns false when the caller should
 // fall back to the dual simplex: the IPM did not converge, or its point failed the strict
-// verifier (there is no crossover yet, so the point is not polished).
+// verifier. `start` gets the crossover basis of the IPM's point when the simplex should continue
+// from it: after a failed verification, and with Params::crossover.
 bool solve_barrier_lp(const Model& model, const Params& params, const Logger& log,
-                      Result& result) {
+                      Result& result, std::vector<VarStatus>& start) {
   IpmOptions options;
   options.time_limit = params.time_limit;
   const IpmResult ipm = solve_ipm(model, options, log);
@@ -192,9 +196,15 @@ bool solve_barrier_lp(const Model& model, const Params& params, const Logger& lo
     return false;
   }
   if (ipm.status != IpmStatus::kOptimal) {
+    // No crossover from an iterate that did not converge: tried on Netlib, its basis made the
+    // simplex slower on most of the 20 such models (pilot87 11,109 -> 115,446 iterations) and
+    // dfl001 ended in a numerical error.
     log.log(1, "Barrier: %s; using the dual simplex", to_string(ipm.status));
     return false;
   }
+  // The crossover basis is guessed from the last iterate, whose distances to the bounds still
+  // show which variables are basic.
+  if (params.crossover) start = crossover_basis(model, ipm.x, ipm.y);
   // The last iterate first; the polished point if the iterate does not pass.
   VerifyReport report = verify_lp_optimality(model, ipm.x, ipm.y);
   if (report.ok || !params.verify) {
@@ -213,8 +223,9 @@ bool solve_barrier_lp(const Model& model, const Params& params, const Logger& lo
       return true;
     }
   }
-  log.log(1, "Barrier: point failed verification (%s); using the dual simplex",
+  log.log(1, "Barrier: point failed verification (%s); crossover to the dual simplex",
           report.message.c_str());
+  if (start.empty()) start = crossover_basis(model, ipm.x, ipm.y);
   return false;
 }
 
@@ -288,9 +299,11 @@ void solve_qp_model(const Model& model, const Params& params, const Logger& log,
 
 // LP by PDLP (--lp-method pdlp; on the GPU with --gpu when built with SAMAYA_CUDA). Returns false
 // when the caller should fall back to the dual simplex: PDLP stopped without an answer, or its
-// answer failed the strict verifier (first-order solutions are less accurate and there is no
-// crossover yet; ARCHITECTURE.md WP1 M4).
-bool solve_pdlp_lp(const Model& model, const Params& params, const Logger& log, Result& result) {
+// answer failed the strict verifier (first-order solutions are less accurate). `start` gets the
+// crossover basis of an optimal PDLP point when the simplex should continue from it: after a
+// failed verification, and with Params::crossover.
+bool solve_pdlp_lp(const Model& model, const Params& params, const Logger& log, Result& result,
+                   std::vector<VarStatus>& start) {
   const Scaling scaled = compute_scaling(model.A);
   const LpProblem scaled_lp = make_problem(model, scaled);
   PdlpOptions pdlp_opts;
@@ -344,9 +357,14 @@ bool solve_pdlp_lp(const Model& model, const Params& params, const Logger& log, 
                         lp.status == SimplexStatus::kInfeasible ||
                         lp.status == SimplexStatus::kUnbounded;
   const bool verified = answered && (!params.verify || verify_lp(model, lp, result));
+  const bool has_point = lp.status == SimplexStatus::kOptimal &&
+                         lp.col_value.size() == static_cast<std::size_t>(n);
+  if (has_point && (params.crossover || !verified)) {
+    start = crossover_basis(model, lp.col_value, lp.row_dual);
+  }
   if (!verified) {
-    log.log(1, "PDLP: %s%s; using the dual simplex", to_string(lp.status),
-            answered ? " failed verification" : "");
+    log.log(1, "PDLP: %s%s; %s", to_string(lp.status), answered ? " failed verification" : "",
+            start.empty() ? "using the dual simplex" : "crossover to the dual simplex");
     result.message.clear();
     return false;
   }
@@ -412,24 +430,47 @@ void solve_lp_model(const Model& model, const Params& requested, const Logger& l
                     Result& result) {
   const Timer timer;
   Params params = requested;
+  bool solved = false;
+  std::vector<VarStatus> start;  // Crossover basis from the barrier or PDLP point.
   if (requested.lp_method == LpMethod::kBarrier || requested.lp_method == LpMethod::kPdlp) {
-    const bool solved = requested.lp_method == LpMethod::kBarrier
-                            ? solve_barrier_lp(model, requested, log, result)
-                            : solve_pdlp_lp(model, requested, log, result);
+    solved = requested.lp_method == LpMethod::kBarrier
+                 ? solve_barrier_lp(model, requested, log, result, start)
+                 : solve_pdlp_lp(model, requested, log, result, start);
     // A time limit in the first method is final; after any other failure the dual simplex gets
     // what is left of the limit.
-    if (solved || result.status == Status::kTimeLimit) return;
+    if ((solved && start.empty()) || result.status == Status::kTimeLimit) return;
     params.time_limit = requested.time_limit - timer.seconds();
   }
   LpResult lp;
   long long iterations = 0;
   bool verified = false;
-  if (params.presolve && solve_presolved_lp(model, params, log, result, lp, iterations)) {
-    verified = params.verify;
-  } else {
-    lp = solve_lp_verified(model, params, log, result, verified);
-    iterations += lp.iterations;
+  bool crossed = false;
+  if (!start.empty()) {
+    // Crossover: the simplex from the basis guessed at the barrier or PDLP point, on the original
+    // model (the basis does not fit a presolved one). If it fails, a verified interior answer
+    // stands; otherwise the dual simplex starts over below.
+    const Result interior = solved ? result : Result{};
+    lp = solve_lp_verified(model, params, log, result, verified, start);
+    iterations = lp.iterations;
+    // Without the verifier, an optimal simplex answer is accepted as it is.
+    const bool accepted = params.verify ? verified : lp.status == SimplexStatus::kOptimal;
+    log.log(1, "Crossover: %s after %lld simplex iterations%s", to_string(lp.status),
+            lp.iterations, accepted ? "" : ", not accepted");
+    if (!accepted && solved) {
+      result = interior;
+      return;
+    }
+    crossed = accepted;
   }
+  if (!crossed) {
+    if (params.presolve && solve_presolved_lp(model, params, log, result, lp, iterations)) {
+      verified = params.verify;
+    } else {
+      lp = solve_lp_verified(model, params, log, result, verified);
+      iterations += lp.iterations;
+    }
+  }
+  result.crossover = crossed && lp.status == SimplexStatus::kOptimal;
 
   result.status = to_status(lp.status);
   result.simplex_iterations = iterations;

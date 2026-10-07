@@ -27,6 +27,9 @@ struct LpResult {
 struct LpSolveOptions {
   bool scale = true;
   SimplexOptions simplex;
+  // Starting statuses (n + m, exactly m basic), e.g. from crossover_basis; empty: the slack
+  // basis. Statuses do not depend on scaling, so the same start serves every attempt.
+  std::vector<VarStatus> start;
 };
 
 // The model in computational form (minimization), scaled by `scaling`:

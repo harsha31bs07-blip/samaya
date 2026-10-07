@@ -79,7 +79,7 @@ LpResult solve_lp(const Model& model, const LpSolveOptions& options, const Logge
 
   auto simplex = std::make_unique<Simplex>(scaled_lp, options.simplex, log);
   LpResult result;
-  result.status = simplex->solve();
+  result.status = options.start.empty() ? simplex->solve() : simplex->solve(options.start);
   result.iterations = simplex->iterations();
   result.stats = simplex->stats();
 

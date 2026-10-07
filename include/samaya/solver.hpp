@@ -39,6 +39,8 @@ struct Result {
   long long simplex_iterations = 0;
   long long barrier_iterations = 0;
   long long nodes = 0;
+  // The answer is the simplex's, started from a crossover basis after barrier or PDLP.
+  bool crossover = false;
 };
 
 class Solver {

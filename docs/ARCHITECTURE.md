@@ -302,6 +302,18 @@ preset is in CI if a GPU runner is available (otherwise documented as a manual s
 - **M5:** **crossover** (primal push, dual push, then simplex cleanup through `Simplex::solve(statuses)`,
   which already accepts a starting basis), giving a basic solution that passes the strict
   verifier. The same crossover serves PDLP (WP1).
+  - **Status (2026-10-07):** built without the push phases. `crossover_basis`
+    (`src/lp/crossover.cpp`) ranks the n + m variables by distance to their bounds against their
+    reduced cost; the m best are basic, and `Simplex::solve(statuses)` repairs and finishes it.
+    `--crossover` reports that basic solution; a barrier or PDLP point that fails verification
+    goes to the simplex from the same basis either way.
+  - **Measured:** on random LPs the simplex needs about 18x fewer iterations than from the slack
+    basis. On Netlib, barrier + crossover gives 93/93 verified optima, 73 of them as crossover
+    basic solutions. The other 20 are models where the barrier stops at its iteration limit;
+    they go to the dual simplex from the slack basis, since a crossover from an unconverged
+    iterate was tried and made most of them slower (dfl001 failed).
+  - **Still open:** the push phases, if the guess proves too weak on large LPs (W2), and the 20
+    barrier non-convergences (an IPM item, not a crossover one).
 
 **Done when:** Netlib 93/93 by barrier plus crossover, and the time comparison with the dual
 simplex is reported.

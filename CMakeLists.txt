@@ -88,6 +88,7 @@ add_library(samaya
   src/linalg/basis_factor.cpp
   src/linalg/ldl.cpp
   src/linalg/ordering.cpp
+  src/lp/crossover.cpp
   src/lp/ipm.cpp
   src/lp/lp_solver.cpp
   src/lp/pdlp.cpp

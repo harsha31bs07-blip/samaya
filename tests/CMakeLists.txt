@@ -1,5 +1,6 @@
 add_executable(samaya_tests
   test_basis_factor.cpp
+  test_crossover.cpp
   test_ldl.cpp
   test_lp_known.cpp
   test_lp_random.cpp
