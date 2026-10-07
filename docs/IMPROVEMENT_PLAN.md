@@ -232,3 +232,26 @@ slack.
 - **Realistic aim:** at 600 s, the six instances both HiGHS and SCIP solve within a minute, plus
   csched008 and rococoC10. That would take samaya from 17 to about 23–25 of 62, level with SCIP.
   Matching HiGHS's 32 needs G and LP speed as well.
+
+## 5. Local branches (status on 2026-10-07)
+
+None of these is pushed. They are kept until the owner says otherwise; `results/*` branches are
+left alone.
+
+| Branch | Status |
+|---|---|
+| `claude/activity-wip`, `claude/cont-prop-wip` | Landed: same tree as 9343abf (propagation on continuous columns) |
+| `claude/conflicts-sb-wip` | Landed: same tree as 28f1ce5 |
+| `claude/cutset-wip` | Landed: same tree as 0bff207 |
+| `claude/fallback-time` | Landed: same tree as 8297b1e |
+| `claude/integration`, `claude/miqp-wip` | Landed: f600682 (MIQP) |
+| `claude/pdlp-restarts` | Landed: same tree as 687448b |
+| `claude/qp-next` | Landed: same tree as 457101d |
+| `claude/qp-ipm` | Earlier draft of the QP interior point; superseded by the reworked 457101d |
+| `claude/wp1-wp2-merge` | Earlier attempt at the WP1/WP2 merge; superseded by 670bab2 |
+| `claude/conflict-speed-wip` | Draft of the conflict skip, superseded by b5dab94 |
+| `claude/tree-rens2-wip` | A3, RENS in the tree: tried, not merged (section 3A) |
+| `claude/estimate-wip` | A1, best-estimate node selection: tried, not merged (section 3A) |
+| `claude/rr-wip` | A2, randomized rounding: tried, not merged (section 3A) |
+| `claude/next-wip` | The alternating first-solution hybrid: not merged; see `docs/handover/HANDOVER.md` (d20a9ba) |
+| `claude/tree-rens-wip` | Fully merged; can be deleted |
