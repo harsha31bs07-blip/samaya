@@ -50,6 +50,36 @@ HiGHS and SCIP on the 18 instances above, at 600 s, and record which instances s
   the instances it should move, stated in advance. An item whose instances don't move in the A/B
   isn't merged, however good the idea is.
 
+### Step 0 results (7–8 October 2026, laptop, alone on the machine)
+
+`bench/attribute.py`: each baseline on the instances it solves, with its defaults and with one
+component switched off, 600 s, one thread, 4 runs at a time; 118 runs. Seconds, or TL (not
+solved in 600 s). Full table: `bench/results/attribution/summary.md` (not committed, like all
+of `bench/results/`).
+
+| Component off | HiGHS instances lost (of 13 it solves) | SCIP instances lost (of 9) |
+|---|---|---|
+| Presolve | **7**: mc11, neos-3627168-kasai, rococoC10-001000, csched008, gmu-35-40, neos-4738912-atrato, tr12-30 (and beasleyC3 38 → 506 s) | 4: mc11, beasleyC3, neos-3627168-kasai, graph20-20-1rand |
+| Cuts (SCIP `separating`) | – | **7**: neos-3381206-awhea, neos-911970, n5-3, mc11, beasleyC3, timtab1, neos-3627168-kasai |
+| Heuristics | 3: gmu-35-40, neos-4738912-atrato, pg5_34 | 0 (slower on six) |
+| Symmetry | 1: neos-4738912-atrato | 2: neos-3627168-kasai, graph20-20-1rand |
+| Conflict analysis | – | 0 |
+
+HiGHS's defaults lose gen-ip054, fastxgemm-n2r6s0t2 and ran14x18-disj-8 on this machine (they
+were near the limit in the earlier run), so they attribute nothing.
+
+What it says for the items below:
+- **C and D first.** HiGHS's presolve is its largest single gain. Its rules are more than the
+  aggregator (probing, clique merging, dominated columns), so after C, attribute again with the
+  HiGHS presolve rules switched off one by one (`presolve_rule_off` bit mask), as the research
+  of 26–27 September started to.
+- **Cuts matter more than the plan assumed.** SCIP without separation loses 7 of 9. samaya has
+  Gomory, c-MIR, covers, flow covers and cliques, so the next step is to measure which of SCIP's
+  separators carry those instances (`separating/<name>/freq = -1` one at a time) before choosing
+  between F (zero-half) and stronger aggregation in c-MIR.
+- **G (symmetry)** is confirmed for three instances; it stays last.
+- **Conflict analysis** carries no instance here; no further work on it.
+
 ## 3. Work items, in order
 
 Effort is in working hours, including tests, presets (about 1.5 h of machine time) and a 30 min
