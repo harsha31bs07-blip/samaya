@@ -106,6 +106,34 @@ samaya solved 93/93, shifted geometric mean 0.315 s (HiGHS 93/93, 0.167 s; shift
 | wood1p | optimal | 1.442902412 | 0.018 | optimal | 1.442902412 | 0.068 |
 | woodw | optimal | 1.304476333 | 0.120 | optimal | 1.304476333 | 0.064 |
 
+## Barrier and crossover (laptop, 7 October 2026)
+
+`bench/compare.sh netlib-barrier`, `netlib-crossover` and `netlib` on the Dell G15 laptop
+(Intel Core i5-13450HX, WSL2), alone on the machine, clock checked (factor 1.000), 4 instances at
+a time, one thread each, build b5cc218 (branch `claude/crossover`). Every answer below passed
+the verifier, and every objective equals HiGHS's to 1e-6.
+
+| Method | Solved | Shifted geomean |
+|---|---|---|
+| samaya, dual simplex (default) | 93/93 | 0.37 s |
+| samaya, `--lp-method barrier` | 93/93 | 0.75 s |
+| samaya, `--lp-method barrier --crossover` | 93/93 | 0.77 s |
+| HiGHS 1.15.1 | 93/93 | 0.21 s |
+| CBC 2.10.11 (Clp) | 93/93 | 0.23 s |
+| GLPK 5.0 | 93/93 | 0.45 s |
+| SCIP 10.0 (SoPlex) | 93/93 | 0.50 s |
+
+- With `--crossover`, 73 of the 93 answers are basic solutions from the crossover basis
+  (median 110 simplex iterations after it). The crossover costs about 0.02 s of geomean over
+  the barrier alone.
+- The other 20 are the models where the barrier stops at its iteration limit (80bau3b, agg,
+  agg2, agg3, bnl2, d2q06c, d6cube, dfl001, etamacro, finnis, greenbea, greenbeb, modszk1, nesm,
+  pilot, pilot.ja, pilot.we, pilot87, recipe, share1b); the dual simplex solves them from the
+  slack basis. Starting it from the crossover basis of the unconverged iterate was tried and made
+  most of them slower (pilot87 11,109 to 115,446 iterations; dfl001 failed), so it is not done.
+- On Netlib the barrier is about twice as slow as the dual simplex; it is there for large and
+  dense models, and the crossover makes its answers basic.
+
 ## Infeasible set (29 instances)
 
 samaya solved 28/29, shifted geometric mean 0.103 s (HiGHS 29/29, 0.008 s; shift 10 s, as in the Mittelmann benchmarks).
