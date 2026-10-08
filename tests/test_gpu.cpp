@@ -5,11 +5,14 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <random>
+#include <span>
 #include <vector>
 
 #include "core/log.hpp"
 #include "gpu/device.hpp"
+#include "gpu/pdhg_core.hpp"
 #include "gpu/spmv.hpp"
 #include "gpu/vector_ops.hpp"
 #include "lp/lp_solver.hpp"
@@ -507,4 +510,188 @@ TEST(gpu_pdlp_vs_cpu) {
     return;
   }
   test_pdlp_gpu_vs_cpu();
+}
+namespace {
+
+// A small LP in computational form with a random equilibration (row scales rs, column scales cs)
+// applied as solve_pdlp applies it, and a device built from it.
+struct EquilibratedLp {
+  LpProblem lp;
+  std::vector<double> rs, cs;
+  std::unique_ptr<samaya::gpu::PdhgDevice> device;
+};
+
+EquilibratedLp make_device_lp(std::mt19937& rng) {
+  EquilibratedLp e;
+  const samaya::Model model = samaya::test::random_lp(LpFamily::kFeasible, 20, 20, rng);
+  e.lp = samaya::make_problem(model, Scaling::identity(model.num_rows(), model.num_cols()));
+  const int m = e.lp.m;
+  const int n = e.lp.n;
+  std::uniform_real_distribution<double> scale(0.5, 2.0);
+  e.rs.resize(m);
+  e.cs.resize(n);
+  for (double& r : e.rs) r = scale(rng);
+  for (double& c : e.cs) c = scale(rng);
+  // A_eq = diag(rs) A diag(cs); costs and bounds of x' = x / cs and r' = rs r.
+  std::vector<samaya::Triplet> t;
+  for (int j = 0; j < n; ++j) {
+    for (samaya::NnzIndex p = e.lp.A.col_start()[j]; p < e.lp.A.col_start()[j + 1]; ++p) {
+      const int i = e.lp.A.row_index()[p];
+      t.push_back({i, j, e.rs[i] * e.lp.A.values()[p] * e.cs[j]});
+    }
+  }
+  const samaya::SparseMatrix a_eq = samaya::SparseMatrix::from_triplets(m, n, std::move(t));
+  std::vector<double> cost = e.lp.cost, lower = e.lp.lower, upper = e.lp.upper;
+  for (int j = 0; j < n; ++j) {
+    cost[j] *= e.cs[j];
+    lower[j] /= e.cs[j];
+    upper[j] /= e.cs[j];
+  }
+  for (int i = 0; i < m; ++i) {
+    cost[n + i] *= e.rs[i];
+    lower[n + i] *= e.rs[i];
+    upper[n + i] *= e.rs[i];
+  }
+  e.device = samaya::gpu::PdhgDevice::create(a_eq, a_eq.transpose(), cost, lower, upper);
+  if (e.device) e.device->set_original(e.cs, e.rs, e.lp.cost, e.lp.lower, e.lp.upper);
+  return e;
+}
+
+// The sums of PdhgDevice::Sums for the scaled iterate (v, y), computed independently on the host
+// from the unequilibrated A.
+samaya::gpu::PdhgDevice::Sums host_sums(const EquilibratedLp& e, const std::vector<double>& v,
+                                        const std::vector<double>& y) {
+  const int m = e.lp.m;
+  const int n = e.lp.n;
+  std::vector<double> value(n + m), y_o(m), ax(m, 0.0), aty(n, 0.0);
+  for (int j = 0; j < n; ++j) value[j] = v[j] * e.cs[j];
+  for (int i = 0; i < m; ++i) value[n + i] = v[n + i] / e.rs[i];
+  for (int i = 0; i < m; ++i) y_o[i] = y[i] * e.rs[i];
+  e.lp.A.multiply(std::span<const double>(value.data(), n), ax);
+  e.lp.A.multiply_transpose(y_o, aty);
+  samaya::gpu::PdhgDevice::Sums s;
+  for (int k = 0; k < n + m; ++k) {
+    const double g = e.lp.cost[k] + (k < n ? aty[k] : -y_o[k - n]);
+    const bool lo = e.lp.lower[k] > -samaya::kInf;
+    const bool up = e.lp.upper[k] < samaya::kInf;
+    const double lambda = lo && up ? g : lo ? std::max(g, 0.0) : up ? std::min(g, 0.0) : 0.0;
+    s.dual_sq += (g - lambda) * (g - lambda);
+    if (lambda > 0.0) s.dual_obj += lambda * e.lp.lower[k];
+    if (lambda < 0.0) s.dual_obj += lambda * e.lp.upper[k];
+    s.primal_obj += e.lp.cost[k] * value[k];
+    if (k < n) {
+      s.x_sq += value[k] * value[k];
+    } else {
+      const int i = k - n;
+      s.primal_sq += (ax[i] - value[k]) * (ax[i] - value[k]);
+      s.r_sq += value[k] * value[k];
+      s.y_sq += y_o[i] * y_o[i];
+    }
+  }
+  return s;
+}
+
+bool same_sums(const samaya::gpu::PdhgDevice::Sums& a, const samaya::gpu::PdhgDevice::Sums& b,
+               double tol) {
+  const auto near = [tol](double x, double y) {
+    return std::fabs(x - y) <= tol * (1.0 + std::fabs(y));
+  };
+  return near(a.primal_sq, b.primal_sq) && near(a.dual_sq, b.dual_sq) &&
+         near(a.primal_obj, b.primal_obj) && near(a.dual_obj, b.dual_obj) &&
+         near(a.x_sq, b.x_sq) && near(a.r_sq, b.r_sq) && near(a.y_sq, b.y_sq);
+}
+
+}  // namespace
+
+TEST(gpu_evaluate_matches_host_sums) {
+  // The residual terms summed on the device equal a host computation from the unequilibrated
+  // matrix, for the current iterate and the average, and are identical when evaluated twice.
+  if (!samaya::gpu::gpu_available()) {
+    std::printf("  SKIPPED (no GPU)\n");
+    return;
+  }
+  using Iterate = samaya::gpu::PdhgDevice::Iterate;
+  std::mt19937 rng(611);
+  int compared = 0;
+  for (int k = 0; k < 20; ++k) {
+    EquilibratedLp e = make_device_lp(rng);
+    REQUIRE(e.device != nullptr);
+    for (long long it = 0; it < 7; ++it) {
+      e.device->step(0.3, 0.3, 1.0, it);
+      e.device->advance();
+    }
+    e.device->step(0.3, 0.3, 1.0, 7);
+    std::vector<double> v_new, y_new, v_erg, y_erg;
+    e.device->download(nullptr, &v_new, nullptr, &y_new, &v_erg, &y_erg);
+    for (const Iterate which : {Iterate::kCurrent, Iterate::kAverage}) {
+      const auto device = e.device->evaluate(which);
+      const auto again = e.device->evaluate(which);
+      const auto host = which == Iterate::kCurrent ? host_sums(e, v_new, y_new)
+                                                   : host_sums(e, v_erg, y_erg);
+      CHECK(same_sums(device, host, 1e-11));
+      CHECK(device.primal_sq == again.primal_sq && device.dual_sq == again.dual_sq &&
+            device.dual_obj == again.dual_obj);
+      ++compared;
+    }
+  }
+  CHECK_EQ(compared, 40);
+}
+
+TEST(gpu_restart_distance_and_restart_to) {
+  // restart_distance measures from the last restart point (zero at first); restart_to makes the
+  // iterate the current point and the new restart point, so the distance to it becomes zero.
+  if (!samaya::gpu::gpu_available()) {
+    std::printf("  SKIPPED (no GPU)\n");
+    return;
+  }
+  using Iterate = samaya::gpu::PdhgDevice::Iterate;
+  std::mt19937 rng(612);
+  EquilibratedLp e = make_device_lp(rng);
+  REQUIRE(e.device != nullptr);
+  for (long long it = 0; it < 5; ++it) {
+    e.device->step(0.3, 0.3, 1.0, it);
+    e.device->advance();
+  }
+  e.device->step(0.3, 0.3, 1.0, 5);
+  std::vector<double> v_erg, y_erg;
+  e.device->download(nullptr, nullptr, nullptr, nullptr, &v_erg, &y_erg);
+  double dv = 0.0, dy = 0.0, host_dv = 0.0, host_dy = 0.0;
+  e.device->restart_distance(Iterate::kAverage, dv, dy);
+  for (const double x : v_erg) host_dv += x * x;
+  for (const double x : y_erg) host_dy += x * x;
+  CHECK(std::fabs(dv - host_dv) <= 1e-12 * (1.0 + host_dv));
+  CHECK(std::fabs(dy - host_dy) <= 1e-12 * (1.0 + host_dy));
+  CHECK(host_dv > 0.0);
+
+  e.device->restart_to(Iterate::kAverage);
+  std::vector<double> v, y, v_new, y_new;
+  e.device->download(&v, &v_new, &y, &y_new, nullptr, nullptr);
+  CHECK(v == v_erg && v_new == v_erg && y == y_erg && y_new == y_erg);
+  e.device->restart_distance(Iterate::kCurrent, dv, dy);
+  CHECK_EQ(dv, 0.0);
+  CHECK_EQ(dy, 0.0);
+}
+
+TEST(gpu_pdlp_runs_are_repeatable) {
+  // The device sums in a fixed order, so two GPU runs make the same decisions: the same
+  // iterations and bit-identical answers.
+  if (!samaya::gpu::gpu_available()) {
+    std::printf("  SKIPPED (no GPU)\n");
+    return;
+  }
+  std::mt19937 rng(613);
+  const samaya::Logger quiet(0);
+  PdlpOptions opts;
+  opts.tol = 1e-6;
+  opts.max_iterations = 20000;
+  opts.use_gpu = true;
+  for (int k = 0; k < 5; ++k) {
+    const samaya::Model model = samaya::test::random_lp(LpFamily::kFeasible, 30, 30, rng);
+    const LpProblem lp = samaya::make_problem(model, samaya::compute_scaling(model.A));
+    const PdlpResult a = samaya::solve_pdlp(lp, opts, quiet);
+    const PdlpResult b = samaya::solve_pdlp(lp, opts, quiet);
+    CHECK(a.status == b.status);
+    CHECK_EQ(a.iterations, b.iterations);
+    CHECK(a.x == b.x && a.y == b.y);
+  }
 }

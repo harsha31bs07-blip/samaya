@@ -23,6 +23,10 @@ namespace {
 // Iterates evaluated (residuals, restarts, detection) once every this many iterations, PDLP's
 // termination_evaluation_frequency (Applegate et al. 2021).
 constexpr long long kCheckFrequency = 64;
+// Infeasibility and unboundedness are checked at every this many evaluations (every 512
+// iterations), after the first 1000 iterations: the checks need the full iterates on the host,
+// which on the GPU costs a copy of every vector.
+constexpr long long kDetectionEvery = 8;
 // Distances below this (scaled space) leave the primal weight unchanged at a restart.
 constexpr double kWeightDistanceFloor = 1e-10;
 
@@ -339,6 +343,7 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
     std::string why;
     try {
       device = gpu::PdhgDevice::create(A_eq, At_eq, cost_eq, lower_eq, upper_eq);
+      if (device) device->set_original(col_scale, row_scale, lp.cost, lp.lower, lp.upper);
     } catch (const std::exception& e) {
       device.reset();
       why = e.what();
@@ -389,11 +394,17 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
   std::vector<double> v_restart(nt, 0.0);
   std::vector<double> y_restart(m, 0.0);
 
-  // Relative residuals and gap of an iterate (vv, yy) in the model's space.
+  // Relative residuals and gap of an iterate (vv, yy) in the model's space, from the sums of
+  // PdhgDevice::Sums: computed here on the CPU, by the device on the GPU (the same terms).
   struct Measure {
     double rel_primal, rel_dual, rel_gap, gap, primal_obj, dual_obj;
   };
-  const auto measure = [&](const std::vector<double>& vv, const std::vector<double>& yy) {
+  struct Sums {
+    double primal_sq = 0.0, dual_sq = 0.0, primal_obj = 0.0, dual_obj = 0.0;
+    double x_sq = 0.0, r_sq = 0.0, y_sq = 0.0;
+  };
+  const auto sums_on_host = [&](const std::vector<double>& vv, const std::vector<double>& yy) {
+    Sums s;
     // Map current iterate to original space for residual computation
     // x_orig[j] = vv[j] * col_scale[j] for j in 0..n-1
     // r_orig[i] = vv[n+i] / row_scale[i] for i in 0..m-1
@@ -406,7 +417,6 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
     for (int i = 0; i < lp.m; ++i) y_orig[i] = yy[i] * row_scale[i];
 
     // Primal residual in original space: ||A * x_orig - r_orig||
-    double primal_res = 0.0;
     if (m > 0) {
       std::vector<double> Ax(lp.m, 0.0);
       for (int j = 0; j < lp.n; ++j) {
@@ -418,13 +428,11 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
       }
       for (int i = 0; i < lp.m; ++i) {
         double diff = Ax[i] - r_orig[i];
-        primal_res += diff * diff;
+        s.primal_sq += diff * diff;
       }
-      primal_res = std::sqrt(primal_res);
     }
 
     // Dual residual in original space: based on A^T y_orig and original cost/bounds
-    double dual_res = 0.0;
     std::vector<double> ATy_orig(lp.n + lp.m, 0.0);
     if (m > 0) {
       // Compute A^T y_orig using original lp.At
@@ -448,49 +456,52 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
         const bool lo = lp.lower[k] > -kInf;
         const bool up = lp.upper[k] < kInf;
         const double lambda = lo && up ? g : lo ? std::max(g, 0.0) : up ? std::min(g, 0.0) : 0.0;
-        dual_res += (g - lambda) * (g - lambda);
+        s.dual_sq += (g - lambda) * (g - lambda);
       }
-      dual_res = std::sqrt(dual_res);
     }
 
     // Primal/dual objective in original space (scale-invariant)
-    double primal_obj = 0.0;
-    for (int j = 0; j < lp.n; ++j) primal_obj += lp.cost[j] * x_orig[j];
-    for (int i = 0; i < lp.m; ++i) primal_obj += lp.cost[lp.n + i] * r_orig[i];
+    for (int j = 0; j < lp.n; ++j) s.primal_obj += lp.cost[j] * x_orig[j];
+    for (int i = 0; i < lp.m; ++i) s.primal_obj += lp.cost[lp.n + i] * r_orig[i];
 
     // Dual objective: min_{lower <= v <= upper} (cost + A^T y)^T v
     // Note: ATy_orig is zero-initialized above and only populated when m > 0, so this
     // computation is correct (and necessary) even for row-less (pure box-constrained)
     // problems -- it must NOT be gated on m > 0, or dual_obj silently stays 0 forever.
-    double dual_obj = 0.0;
     for (int k = 0; k < lp.n + lp.m; ++k) {
       const double g = lp.cost[k] + ATy_orig[k];
       const bool lo = lp.lower[k] > -kInf;
       const bool up = lp.upper[k] < kInf;
       const double lambda = lo && up ? g : lo ? std::max(g, 0.0) : up ? std::min(g, 0.0) : 0.0;
-      if (lambda > 0.0) dual_obj += lambda * lp.lower[k];
-      if (lambda < 0.0) dual_obj += lambda * lp.upper[k];
+      if (lambda > 0.0) s.dual_obj += lambda * lp.lower[k];
+      if (lambda < 0.0) s.dual_obj += lambda * lp.upper[k];
     }
-
+    for (int j = 0; j < lp.n; ++j) s.x_sq += x_orig[j] * x_orig[j];
+    for (int i = 0; i < lp.m; ++i) s.r_sq += r_orig[i] * r_orig[i];
+    for (int i = 0; i < lp.m; ++i) s.y_sq += y_orig[i] * y_orig[i];
+    return s;
+  };
+  // ||c||, for the dual scale; constant.
+  double c_norm = 0.0;
+  for (int j = 0; j < nt; ++j) c_norm += lp.cost[j] * lp.cost[j];
+  c_norm = std::sqrt(c_norm);
+  const auto finish = [&](const Sums& s) {
+    const double primal_res = std::sqrt(s.primal_sq);
+    const double dual_res = std::sqrt(s.dual_sq);
+    const double primal_obj = s.primal_obj;
+    const double dual_obj = s.dual_obj;
     double gap = primal_obj - dual_obj;
 
     // Compute scaling for relative residuals using ORIGINAL problem data
     // Primal scale: 1 + ||A|| * ||x_orig|| + ||r_orig||
     const double A_norm = a_norm_max_col;  // Constant: computed once before the loop.
-    double x_norm = 0.0, r_norm = 0.0;
-    for (int j = 0; j < lp.n; ++j) x_norm += x_orig[j] * x_orig[j];
-    for (int i = 0; i < lp.m; ++i) r_norm += r_orig[i] * r_orig[i];
-    x_norm = std::sqrt(x_norm);
-    r_norm = std::sqrt(r_norm);
+    const double x_norm = std::sqrt(s.x_sq);
+    const double r_norm = std::sqrt(s.r_sq);
     double primal_scale = 1.0 + A_norm * x_norm + r_norm;
 
     // Dual scale: 1 + ||A^T|| * ||y_orig|| + ||c||
     const double At_norm = at_norm_max_row;  // Constant: computed once before the loop.
-    double y_norm = 0.0, c_norm = 0.0;
-    for (int i = 0; i < lp.m; ++i) y_norm += y_orig[i] * y_orig[i];
-    for (int j = 0; j < nt; ++j) c_norm += lp.cost[j] * lp.cost[j];
-    y_norm = std::sqrt(y_norm);
-    c_norm = std::sqrt(c_norm);
+    const double y_norm = std::sqrt(s.y_sq);
     double dual_scale = 1.0 + At_norm * y_norm + c_norm;
 
     // Gap scale: 1 + |primal_obj| + |dual_obj|
@@ -500,6 +511,9 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
     double rel_dual = (m > 0) ? (dual_res / dual_scale) : 0.0;
     double rel_gap = gap / gap_scale;
     return Measure{rel_primal, rel_dual, rel_gap, gap, primal_obj, dual_obj};
+  };
+  const auto measure = [&](const std::vector<double>& vv, const std::vector<double>& yy) {
+    return finish(sums_on_host(vv, yy));
   };
   // PDLP's KKT error, weighted by the primal weight.
   const auto kkt = [&](const Measure& e) {
@@ -534,7 +548,7 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
         device->advance();
         continue;
       }
-      device->download(&v, &v_new, nullptr, &y_new, &v_erg, &y_erg);
+      // The iterates stay on the device; evaluate() below sums what the decisions need.
     } else {
 #endif
       // Standard PDHG extrapolation: v_bar = v + theta * (v - v_prev)
@@ -616,8 +630,27 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
       continue;
     }
 
+#ifdef SAMAYA_HAVE_CUDA
+    const auto device_measure = [&](gpu::PdhgDevice::Iterate which) {
+      const gpu::PdhgDevice::Sums d = device->evaluate(which);
+      Sums sums;
+      sums.primal_sq = d.primal_sq;
+      sums.dual_sq = d.dual_sq;
+      sums.primal_obj = d.primal_obj;
+      sums.dual_obj = d.dual_obj;
+      sums.x_sq = d.x_sq;
+      sums.r_sq = d.r_sq;
+      sums.y_sq = d.y_sq;
+      return finish(sums);
+    };
+    const Measure current = device ? device_measure(gpu::PdhgDevice::Iterate::kCurrent)
+                                   : measure(v_new, y_new);
+    const Measure average = device ? device_measure(gpu::PdhgDevice::Iterate::kAverage)
+                                   : measure(v_erg, y_erg);
+#else
     const Measure current = measure(v_new, y_new);
     const Measure average = measure(v_erg, y_erg);
+#endif
     const double rel_primal = current.rel_primal;
     const double rel_dual = current.rel_dual;
     const double rel_gap = current.rel_gap;
@@ -635,6 +668,9 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
       result.primal_residual = rel_primal;
       result.dual_residual = rel_dual;
       result.gap = rel_gap;
+#ifdef SAMAYA_HAVE_CUDA
+      if (device) device->download(nullptr, &v_new, nullptr, &y_new, nullptr, nullptr);
+#endif
       v = v_new;
       y = y_new;
       break;
@@ -647,15 +683,23 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
       result.primal_residual = average.rel_primal;
       result.dual_residual = average.rel_dual;
       result.gap = average.rel_gap;
+#ifdef SAMAYA_HAVE_CUDA
+      if (device) device->download(nullptr, nullptr, nullptr, nullptr, &v_erg, &y_erg);
+#endif
       v = v_erg;
       y = y_erg;
       break;
     }
 
     // --- Infeasibility / Unboundedness detection (M3) ---
-    // Check every 100 iterations after the first 1000 iterations
-    // (Give ergodic averages time to converge; avoid checking after restarts)
-    if (iter > 1000 && m > 0) {
+    // At every kDetectionEvery-th evaluation after the first 1000 iterations (the ergodic
+    // averages need time to converge).
+    const bool detect =
+        iter > 1000 && m > 0 && ((iter + 1) / kCheckFrequency) % kDetectionEvery == 0;
+#ifdef SAMAYA_HAVE_CUDA
+    if (detect && device) device->download(&v, &v_new, nullptr, &y_new, &v_erg, &y_erg);
+#endif
+    if (detect) {
       // --- Check for primal infeasibility (Farkas certificate) ---
       // Unscale the dual certificate to original space: y_orig = y_erg * row_scale
       std::vector<double> y_farkas(m, 0.0);
@@ -1019,8 +1063,18 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
         const std::vector<double>& yc = to_average ? y_erg : y_new;
         double dx = 0.0;
         double dy = 0.0;
-        for (int k = 0; k < nt; ++k) dx += (vc[k] - v_restart[k]) * (vc[k] - v_restart[k]);
-        for (int i = 0; i < m; ++i) dy += (yc[i] - y_restart[i]) * (yc[i] - y_restart[i]);
+#ifdef SAMAYA_HAVE_CUDA
+        const auto which = to_average ? gpu::PdhgDevice::Iterate::kAverage
+                                      : gpu::PdhgDevice::Iterate::kCurrent;
+        if (device) {
+          device->restart_distance(which, dx, dy);
+        } else {
+#endif
+          for (int k = 0; k < nt; ++k) dx += (vc[k] - v_restart[k]) * (vc[k] - v_restart[k]);
+          for (int i = 0; i < m; ++i) dy += (yc[i] - y_restart[i]) * (yc[i] - y_restart[i]);
+#ifdef SAMAYA_HAVE_CUDA
+        }
+#endif
         dx = std::sqrt(dx);
         dy = std::sqrt(dy);
         if (dx > kWeightDistanceFloor && dy > kWeightDistanceFloor) {
@@ -1030,15 +1084,21 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
         }
         log.log(2, "pdlp: restart at iter %lld to the %s (KKT %.2e), omega %.3e", iter,
                 to_average ? "average" : "current iterate", kkt_candidate, omega);
-        v_restart = vc;
-        y_restart = yc;
-        // The end of this iteration shifts v_new into v and v into v_prev: both become the
-        // candidate, so the next step starts without momentum.
-        v_new = v_restart;
-        v = v_restart;
-        y_new = y_restart;
 #ifdef SAMAYA_HAVE_CUDA
-        if (device) device->set_iterate(v_restart, y_restart);
+        if (device) {
+          // The same on the device, without reading the iterates back.
+          device->restart_to(which);
+        } else {
+#endif
+          v_restart = vc;
+          y_restart = yc;
+          // The end of this iteration shifts v_new into v and v into v_prev: both become the
+          // candidate, so the next step starts without momentum.
+          v_new = v_restart;
+          v = v_restart;
+          y_new = y_restart;
+#ifdef SAMAYA_HAVE_CUDA
+        }
 #endif
         iter_since_restart = 0;
         kkt_at_restart = kkt_candidate;
@@ -1046,8 +1106,9 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
       }
     }
 
-    // Debug: log y_erg norm for infeasibility detection
-    if (iter > 1000 && m > 0) {
+    // Debug: log y_erg norm for infeasibility detection (the host copy is current only at a
+    // detection check).
+    if (detect && log.level() >= 2) {
       double y_erg_norm = 0.0;
       for (int i = 0; i < m; ++i) y_erg_norm += y_erg[i] * y_erg[i];
       y_erg_norm = std::sqrt(y_erg_norm);
