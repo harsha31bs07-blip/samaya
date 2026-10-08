@@ -695,3 +695,62 @@ TEST(gpu_pdlp_runs_are_repeatable) {
     CHECK(a.x == b.x && a.y == b.y);
   }
 }
+
+TEST(gpu_spmv_tile_widths_match_the_cpu) {
+  // Every tile width gives the CPU product on rows that are empty, shorter than the tile, and
+  // much longer than it, and the same bits when run twice.
+  if (!samaya::gpu::gpu_available()) {
+    std::printf("  SKIPPED (no GPU)\n");
+    return;
+  }
+  std::mt19937 rng(614);
+  const int m = 3000;
+  const int n = 2000;
+  std::vector<int> ptr{0}, idx;
+  std::vector<double> val;
+  std::uniform_int_distribution<int> col(0, n - 1);
+  std::uniform_real_distribution<double> value(-1.0, 1.0);
+  for (int i = 0; i < m; ++i) {
+    const int len = i % 97 == 0 ? 0 : i % 41 == 0 ? 300 : 1 + static_cast<int>(rng() % 12);
+    for (int k = 0; k < len; ++k) {
+      idx.push_back(col(rng));
+      val.push_back(value(rng));
+    }
+    ptr.push_back(static_cast<int>(idx.size()));
+  }
+  std::vector<double> x(n);
+  for (double& v : x) v = value(rng);
+  std::vector<double> y_cpu(m, 0.0);
+  for (int i = 0; i < m; ++i) {
+    for (int k = ptr[i]; k < ptr[i + 1]; ++k) y_cpu[i] += val[k] * x[idx[k]];
+  }
+  int *d_ptr = nullptr, *d_idx = nullptr;
+  double *d_val = nullptr, *d_x = nullptr, *d_y = nullptr;
+  SAMAYA_CUDA_CHECK(cudaMalloc(&d_ptr, ptr.size() * sizeof(int)));
+  SAMAYA_CUDA_CHECK(cudaMalloc(&d_idx, idx.size() * sizeof(int)));
+  SAMAYA_CUDA_CHECK(cudaMalloc(&d_val, val.size() * sizeof(double)));
+  SAMAYA_CUDA_CHECK(cudaMalloc(&d_x, x.size() * sizeof(double)));
+  SAMAYA_CUDA_CHECK(cudaMalloc(&d_y, m * sizeof(double)));
+  SAMAYA_CUDA_CHECK(
+      cudaMemcpy(d_ptr, ptr.data(), ptr.size() * sizeof(int), cudaMemcpyHostToDevice));
+  SAMAYA_CUDA_CHECK(
+      cudaMemcpy(d_idx, idx.data(), idx.size() * sizeof(int), cudaMemcpyHostToDevice));
+  SAMAYA_CUDA_CHECK(
+      cudaMemcpy(d_val, val.data(), val.size() * sizeof(double), cudaMemcpyHostToDevice));
+  SAMAYA_CUDA_CHECK(cudaMemcpy(d_x, x.data(), x.size() * sizeof(double), cudaMemcpyHostToDevice));
+  for (const int t : {2, 4, 8, 16, 32}) {
+    std::vector<double> a(m), b(m);
+    samaya::gpu::csr_spmv(m, d_ptr, d_idx, d_val, d_x, d_y, 0, t);
+    SAMAYA_CUDA_CHECK(cudaMemcpy(a.data(), d_y, m * sizeof(double), cudaMemcpyDeviceToHost));
+    samaya::gpu::csr_spmv(m, d_ptr, d_idx, d_val, d_x, d_y, 0, t);
+    SAMAYA_CUDA_CHECK(cudaMemcpy(b.data(), d_y, m * sizeof(double), cudaMemcpyDeviceToHost));
+    CHECK(check_relative("csr_spmv tile", a.data(), y_cpu.data(), m));
+    CHECK(a == b);
+  }
+  CHECK_EQ(samaya::gpu::spmv_threads_per_row(4117330, 467376), 16);
+  CHECK_EQ(samaya::gpu::spmv_threads_per_row(4117330, 1001520), 8);
+  for (void* p : {static_cast<void*>(d_ptr), static_cast<void*>(d_idx), static_cast<void*>(d_val),
+                  static_cast<void*>(d_x), static_cast<void*>(d_y)}) {
+    cudaFree(p);
+  }
+}

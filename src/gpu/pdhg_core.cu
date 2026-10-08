@@ -163,6 +163,7 @@ double* zeros(std::size_t count) {
 // of its transpose.
 struct DeviceCsr {
   int rows = 0;
+  int threads_per_row = 32;  // csr_spmv's tile width for this matrix's average row length.
   int* ptr = nullptr;
   int* idx = nullptr;
   double* val = nullptr;
@@ -178,6 +179,8 @@ DeviceCsr upload_csr_of_transpose(const SparseMatrix& csc) {
   }
   std::vector<int> ptr(start.size());
   for (std::size_t k = 0; k < start.size(); ++k) ptr[k] = static_cast<int>(start[k]);
+  d.threads_per_row =
+      spmv_threads_per_row(start.empty() ? 0 : static_cast<long long>(start.back()), d.rows);
   d.ptr = upload(ptr.data(), ptr.size());
   d.idx = upload(csc.row_index().data(), csc.row_index().size());
   d.val = upload(csc.values().data(), csc.values().size());
@@ -274,9 +277,11 @@ void PdhgDevice::step(double tau, double sigma, double theta, long long iter) {
   const int nt = d.n + d.m;
   extrapolate_kernel<<<blocks(nt), kBlock>>>(nt, d.v, d.v_prev, theta, d.v_bar);
   if (d.m > 0) {
-    csr_spmv(d.m, d.a_rows.ptr, d.a_rows.idx, d.a_rows.val, d.v_bar, d.ax);
+    csr_spmv(d.m, d.a_rows.ptr, d.a_rows.idx, d.a_rows.val, d.v_bar, d.ax, 0,
+             d.a_rows.threads_per_row);
     dual_kernel<<<blocks(d.m), kBlock>>>(d.m, d.n, d.y, d.ax, d.v_bar, sigma, d.y_new);
-    csr_spmv(d.n, d.at_rows.ptr, d.at_rows.idx, d.at_rows.val, d.y_new, d.aty);
+    csr_spmv(d.n, d.at_rows.ptr, d.at_rows.idx, d.at_rows.val, d.y_new, d.aty, 0,
+             d.at_rows.threads_per_row);
   }
   primal_kernel<<<blocks(nt), kBlock>>>(d.n, d.m, d.v, d.cost, d.aty, d.y_new, d.lower, d.upper,
                                         tau, d.v_new);
@@ -318,8 +323,9 @@ PdhgDevice::Sums PdhgDevice::evaluate(Iterate which) {
   const double* y = which == Iterate::kCurrent ? d.y_new : d.y_erg;
   // ax and aty are scratch between steps: step() recomputes both from v_bar and y_new.
   if (d.m > 0) {
-    csr_spmv(d.m, d.a_rows.ptr, d.a_rows.idx, d.a_rows.val, v, d.ax);
-    csr_spmv(d.n, d.at_rows.ptr, d.at_rows.idx, d.at_rows.val, y, d.aty);
+    csr_spmv(d.m, d.a_rows.ptr, d.a_rows.idx, d.a_rows.val, v, d.ax, 0, d.a_rows.threads_per_row);
+    csr_spmv(d.n, d.at_rows.ptr, d.at_rows.idx, d.at_rows.val, y, d.aty, 0,
+             d.at_rows.threads_per_row);
   }
   measure_kernel<<<kReduceBlocks, kBlock>>>(d.n, d.m, v, y, d.ax, d.aty, d.col_scale, d.row_scale,
                                             d.cost_original, d.lower_original, d.upper_original,
