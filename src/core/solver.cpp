@@ -26,6 +26,11 @@ const char* version() { return SAMAYA_VERSION_STRING; }
 namespace {
 
 constexpr double kPdlpTolerance = 1e-8;
+// With --crossover the simplex makes PDLP's answer exact, so PDLP only has to get close: its
+// design tolerance (ARCHITECTURE.md WP1 M5; cuPDLP's default).
+constexpr double kPdlpCrossoverTolerance = 1e-4;
+// The automatic crossover iteration cap is 2 (rows + columns), and at least this.
+constexpr long long kCrossoverMinIterations = 10000;
 
 Status to_status(SimplexStatus s) {
   switch (s) {
@@ -67,10 +72,12 @@ bool verify_lp(const Model& model, const LpResult& lp, Result& result) {
 // whether it passed (limit statuses claim nothing and count as verified).
 LpResult solve_lp_verified(const Model& model, const Params& params, const Logger& log,
                            Result& result, bool& verified,
-                           const std::vector<VarStatus>& start = {}) {
+                           const std::vector<VarStatus>& start = {},
+                           long long max_iterations = -1) {
   LpSolveOptions attempts[3];
   attempts[0] = lp_options_from_params(params);
   attempts[0].start = start;
+  attempts[0].simplex.max_iterations = max_iterations;
   attempts[1] = attempts[0];
   attempts[1].simplex.primal_tol = std::min(attempts[1].simplex.primal_tol, 1e-9);
   attempts[1].simplex.dual_tol = std::min(attempts[1].simplex.dual_tol, 1e-9);
@@ -309,7 +316,9 @@ bool solve_pdlp_lp(const Model& model, const Params& params, const Logger& log, 
   PdlpOptions pdlp_opts;
   // PDLP's strict tolerance (ARCHITECTURE.md WP1 M5): at the simplex's 1e-7 a first-order
   // method leaves objective errors near 1e-5; at 1e-8 its answers agree with the other engines.
-  pdlp_opts.tol = std::min(params.dual_feasibility_tol, kPdlpTolerance);
+  // With crossover, the loose one: the simplex finishes from the crossover basis.
+  pdlp_opts.tol = params.crossover ? kPdlpCrossoverTolerance
+                                   : std::min(params.dual_feasibility_tol, kPdlpTolerance);
   pdlp_opts.max_iterations = -1;  // Automatic, proportional to the problem size.
   pdlp_opts.time_limit = params.time_limit;
   pdlp_opts.use_gpu = params.use_gpu;
@@ -450,10 +459,18 @@ void solve_lp_model(const Model& model, const Params& requested, const Logger& l
     // model (the basis does not fit a presolved one). If it fails, a verified interior answer
     // stands; otherwise the dual simplex starts over below.
     const Result interior = solved ? result : Result{};
-    lp = solve_lp_verified(model, params, log, result, verified, start);
+    const long long nm = static_cast<long long>(model.num_rows()) + model.num_cols();
+    const long long cap = params.crossover_max_iterations >= 0
+                              ? params.crossover_max_iterations
+                              : std::max<long long>(kCrossoverMinIterations, 2 * nm);
+    lp = solve_lp_verified(model, params, log, result, verified, start, cap);
     iterations = lp.iterations;
-    // Without the verifier, an optimal simplex answer is accepted as it is.
-    const bool accepted = params.verify ? verified : lp.status == SimplexStatus::kOptimal;
+    // Only an answer counts (the verifier passes a status without one, like an iteration
+    // limit); without the verifier, an answer is accepted as it is.
+    const bool answered = lp.status == SimplexStatus::kOptimal ||
+                          lp.status == SimplexStatus::kInfeasible ||
+                          lp.status == SimplexStatus::kUnbounded;
+    const bool accepted = answered && (verified || !params.verify);
     log.log(1, "Crossover: %s after %lld simplex iterations%s", to_string(lp.status),
             lp.iterations, accepted ? "" : ", not accepted");
     if (!accepted && solved) {

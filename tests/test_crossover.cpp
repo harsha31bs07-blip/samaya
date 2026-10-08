@@ -153,3 +153,34 @@ TEST(crossover_through_the_solver_reports_verified_basic_optima) {
   CHECK(crossed > 80);
   CHECK(crossover_iterations * 4 < dual_iterations);
 }
+
+TEST(crossover_that_cannot_finish_falls_back_to_the_dual_simplex) {
+  // With no crossover iterations allowed, the crossover stops without an answer; the dual
+  // simplex must then solve the model from the slack basis, and the reported answer is its,
+  // verified (a crossover stopped at its iteration limit used to be reported as the answer).
+  std::mt19937 rng(304);
+  int mismatches = 0;
+  int fell_back = 0;
+  for (const samaya::LpMethod method : {samaya::LpMethod::kBarrier, samaya::LpMethod::kPdlp}) {
+    for (int k = 0; k < 40; ++k) {
+      const Model model = samaya::test::random_lp(LpFamily::kFeasible, 10, 10, rng);
+      const ReferenceResult ref = ReferenceLp(model).solve();
+      if (ref.status != ReferenceResult::Status::kOptimal) continue;
+      samaya::Params params;
+      params.log_level = 0;
+      params.lp_method = method;
+      params.crossover = true;
+      params.crossover_max_iterations = 0;
+      const samaya::Result r = samaya::Solver(params).solve(model);
+      if (!(r.status == samaya::Status::kOptimal && r.verified &&
+            close(r.objective, ref.objective))) {
+        ++mismatches;
+        std::printf("  mismatch (#%d): %s %.10g vs reference %.10g\n", k,
+                    samaya::to_string(r.status), r.objective, ref.objective);
+      }
+      if (!r.crossover) ++fell_back;
+    }
+  }
+  CHECK_EQ(mismatches, 0);
+  CHECK(fell_back > 20);
+}
