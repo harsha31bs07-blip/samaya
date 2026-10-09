@@ -203,3 +203,74 @@ TEST(minimum_degree_reduces_fill) {
   std::sort(sorted.begin(), sorted.end());
   CHECK(sorted == natural);  // A permutation.
 }
+
+TEST(minimum_degree_approximate_degrees_keep_the_fill) {
+  // AMD's approximate degree, used for the expensive updates of large models, must give a valid
+  // permutation and nearly the fill of the exact degrees, on the KKT pattern of a transportation
+  // LP (the model whose exact ordering took 16 s at 400 x 400) and on the grid.
+  const int s = 60;
+  const int d = 60;
+  const int n = s * d;
+  const int m = s + d;
+  std::vector<Triplet> t;
+  for (int k = 0; k < n + m; ++k) t.push_back({k, k, 1.0});
+  for (int i = 0; i < s; ++i) {
+    for (int j = 0; j < d; ++j) {
+      t.push_back({i * d + j, n + i, 1.0});
+      t.push_back({i * d + j, n + s + j, 1.0});
+    }
+  }
+  const SparseMatrix kkt = SparseMatrix::from_triplets(n + m, n + m, t);
+  const auto exact = samaya::minimum_degree_order(kkt, static_cast<std::size_t>(-1));
+  const auto approximate = samaya::minimum_degree_order(kkt, 0);
+  std::vector<Index> sorted = approximate;
+  std::sort(sorted.begin(), sorted.end());
+  std::vector<Index> natural(static_cast<std::size_t>(n + m));
+  std::iota(natural.begin(), natural.end(), Index{0});
+  CHECK(sorted == natural);
+  const samaya::NnzIndex fill_exact = fill(kkt, exact);
+  const samaya::NnzIndex fill_approximate = fill(kkt, approximate);
+  std::printf("  transportation KKT %d: fill %lld (approximate) vs %lld (exact)\n", n + m,
+              static_cast<long long>(fill_approximate), static_cast<long long>(fill_exact));
+  CHECK(static_cast<double>(fill_approximate) <= 1.1 * static_cast<double>(fill_exact));
+
+  // The grid and random sparse symmetric patterns, where the elements' share of the bound
+  // matters: approximate degrees everywhere must stay within 10% of the exact fill in total.
+  std::vector<SparseMatrix> patterns;
+  {
+    const int g = 30;
+    std::vector<Triplet> grid;
+    for (int r = 0; r < g; ++r) {
+      for (int c = 0; c < g; ++c) {
+        const int i = r * g + c;
+        grid.push_back({i, i, 4.0});
+        if (c + 1 < g) grid.push_back({i, i + 1, -1.0});
+        if (r + 1 < g) grid.push_back({i, i + g, -1.0});
+      }
+    }
+    patterns.push_back(SparseMatrix::from_triplets(g * g, g * g, grid));
+  }
+  std::mt19937 rng(905);
+  for (int k = 0; k < 6; ++k) {
+    const int size = 400;
+    std::vector<Triplet> r;
+    std::uniform_int_distribution<int> node(0, size - 1);
+    for (int i = 0; i < size; ++i) r.push_back({i, i, 1.0});
+    for (int e = 0; e < 3 * size; ++e) {
+      const int a = node(rng);
+      const int b = node(rng);
+      if (a != b) r.push_back({std::min(a, b), std::max(a, b), 1.0});
+    }
+    patterns.push_back(SparseMatrix::from_triplets(size, size, r));
+  }
+  long long total_exact = 0;
+  long long total_approximate = 0;
+  for (const SparseMatrix& pattern : patterns) {
+    const std::size_t always_exact = static_cast<std::size_t>(-1);
+    total_exact += fill(pattern, samaya::minimum_degree_order(pattern, always_exact));
+    total_approximate += fill(pattern, samaya::minimum_degree_order(pattern, 0));
+  }
+  std::printf("  grid and random patterns: fill %lld (approximate) vs %lld (exact)\n",
+              total_approximate, total_exact);
+  CHECK(static_cast<double>(total_approximate) <= 1.1 * static_cast<double>(total_exact));
+}

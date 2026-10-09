@@ -18,7 +18,8 @@ Index dense_threshold(Index n) {
 
 }  // namespace
 
-std::vector<Index> minimum_degree_order(const SparseMatrix& pattern) {
+std::vector<Index> minimum_degree_order(const SparseMatrix& pattern,
+                                        std::size_t exact_degree_work) {
   const Index n = pattern.cols();
   const auto nn = static_cast<std::size_t>(n);
   std::vector<std::vector<Index>> vars(nn);  // Variable neighbours (uneliminated).
@@ -53,37 +54,16 @@ std::vector<Index> minimum_degree_order(const SparseMatrix& pattern) {
   std::vector<std::vector<Index>> evars(nn);  // Variables of each element (an eliminated pivot).
   std::vector<char> absorbed(nn, 0);
   std::vector<Index> mark(nn, -1);
-  std::vector<Index> mark2(nn, -1);
-  Index stamp = 0;
+  // w[e] = |Le \ Lp| for the elements next to the new element's variables (AMD's approximate
+  // degree), valid where wmark[e] == the current pivot's stamp.
+  std::vector<Index> w(nn, 0);
+  std::vector<Index> wmark(nn, -1);
+  std::vector<Index> mark2(nn, -1);  // For the exact degree.
   Index stamp2 = 0;
+  Index stamp = 0;
+  Index remaining = 0;  // Variables not yet eliminated (dense ones excluded).
   std::vector<Index> degree(nn, 0);
   std::set<std::pair<Index, Index>> queue;  // (degree, variable)
-
-  const auto compute_degree = [&](Index i) {
-    ++stamp2;
-    mark2[static_cast<std::size_t>(i)] = stamp2;
-    Index count = 0;
-    for (const Index v : vars[static_cast<std::size_t>(i)]) {
-      if (mark2[static_cast<std::size_t>(v)] != stamp2) {
-        mark2[static_cast<std::size_t>(v)] = stamp2;
-        ++count;
-      }
-    }
-    for (const Index e : elems[static_cast<std::size_t>(i)]) {
-      auto& list = evars[static_cast<std::size_t>(e)];
-      std::size_t keep = 0;
-      for (const Index v : list) {
-        if (eliminated[static_cast<std::size_t>(v)]) continue;
-        list[keep++] = v;
-        if (mark2[static_cast<std::size_t>(v)] != stamp2) {
-          mark2[static_cast<std::size_t>(v)] = stamp2;
-          ++count;
-        }
-      }
-      list.resize(keep);
-    }
-    return count;
-  };
 
   for (Index i = 0; i < n; ++i) {
     if (eliminated[static_cast<std::size_t>(i)]) continue;
@@ -93,6 +73,7 @@ std::vector<Index> minimum_degree_order(const SparseMatrix& pattern) {
             v.end());
     degree[static_cast<std::size_t>(i)] = static_cast<Index>(v.size());
     queue.insert({degree[static_cast<std::size_t>(i)], i});
+    ++remaining;
   }
 
   std::vector<Index> perm;
@@ -104,6 +85,7 @@ std::vector<Index> minimum_degree_order(const SparseMatrix& pattern) {
     const auto up = static_cast<std::size_t>(p);
     eliminated[up] = 1;
     perm.push_back(p);
+    --remaining;
 
     // The new element: p's variables and the variables of its elements, which it absorbs.
     ++stamp;
@@ -149,10 +131,74 @@ std::vector<Index> minimum_degree_order(const SparseMatrix& pattern) {
                               }),
                vl.end());
     }
+    // Approximate degrees (Amestoy, Davis and Duff 1996): w[e] = |Le \ Lp| for every element e
+    // next to Lp, from one pass over their element lists; the exact degree, a union over all of
+    // a variable's elements, cost about 16 s on a 400 x 400 transportation KKT system.
+    for (const Index i : lp) {
+      for (const Index e : elems[static_cast<std::size_t>(i)]) {
+        const auto ue = static_cast<std::size_t>(e);
+        if (e == p) continue;
+        if (wmark[ue] != stamp) {
+          wmark[ue] = stamp;
+          w[ue] = static_cast<Index>(evars[ue].size());
+        }
+        --w[ue];
+      }
+    }
+    const Index lp_size = static_cast<Index>(lp.size());
     for (const Index i : lp) {
       const auto ui = static_cast<std::size_t>(i);
+      Index external = 0;  // Sum of |Le \ Lp| over i's other elements.
+      auto& el = elems[ui];
+      std::size_t keep = 0;
+      for (const Index e : el) {
+        const auto ue = static_cast<std::size_t>(e);
+        if (absorbed[ue]) continue;
+        if (e != p && w[ue] == 0) {
+          // Aggressive absorption: Le is inside Lp, so the new element covers it.
+          absorbed[ue] = 1;
+          std::vector<Index>().swap(evars[ue]);
+          continue;
+        }
+        if (e != p) external += w[ue];
+        el[keep++] = e;
+      }
+      el.resize(keep);
+      const Index own = static_cast<Index>(vars[ui].size());
+      std::size_t work = vars[ui].size();
+      for (const Index e : el) work += evars[static_cast<std::size_t>(e)].size();
+      Index d = 0;
+      // Exact while cheap (kExactDegreeWork): small models keep the exact minimum-degree order,
+      // which the barrier was developed on (with AMD's bound everywhere, beaconfd and forplan
+      // stopped verifying from the barrier alone); a 400 x 400 transportation KKT system orders
+      // in about 2 s instead of 16 s.
+      if (work <= exact_degree_work) {
+        // Exact: i's own neighbours and the variables of its elements (p's among them), counted
+        // once each.
+        ++stamp2;
+        mark2[ui] = stamp2;
+        for (const Index v : vars[ui]) {
+          if (mark2[static_cast<std::size_t>(v)] != stamp2) {
+            mark2[static_cast<std::size_t>(v)] = stamp2;
+            ++d;
+          }
+        }
+        for (const Index e : el) {
+          for (const Index v : evars[static_cast<std::size_t>(e)]) {
+            if (mark2[static_cast<std::size_t>(v)] != stamp2) {
+              mark2[static_cast<std::size_t>(v)] = stamp2;
+              ++d;
+            }
+          }
+        }
+      } else {
+        // AMD's bound: no more than the variables left, than the old degree plus the new
+        // element, or than i's own neighbours plus the new element plus the other elements
+        // outside it.
+        d = std::min({remaining - 1, degree[ui] + lp_size - 1, own + lp_size - 1 + external});
+      }
       queue.erase({degree[ui], i});
-      degree[ui] = compute_degree(i);
+      degree[ui] = std::max<Index>(d, 0);
       queue.insert({degree[ui], i});
     }
   }
