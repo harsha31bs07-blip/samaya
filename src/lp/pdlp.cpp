@@ -747,19 +747,23 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
         }
         double tol = 1e-9 * w_scale;  // Relative tolerance
 
-        // Debug: log non-zero coefficients for free variables
-        for (int j = 0; j < lp.n; ++j) {
-          if (std::fabs(aty_farkas[j]) > tol &&
-              (lp.lower[j] <= -kInf / 2 || lp.upper[j] >= kInf / 2)) {
-            log.log(2, "pdlp: infeas cert free col j=%d coef=%.2e tol=%.2e lower=%.2e upper=%.2e",
-                    j, aty_farkas[j], tol, lp.lower[j], lp.upper[j]);
+        // Debug: the nonzero coefficients on free variables, one line each, so only at level 3:
+        // at level 2 they made 16 GB of log in 900 s on a 1-million-column LP.
+        if (log.level() >= 3) {
+          for (int j = 0; j < lp.n; ++j) {
+            if (std::fabs(aty_farkas[j]) > tol &&
+                (lp.lower[j] <= -kInf / 2 || lp.upper[j] >= kInf / 2)) {
+              log.log(3, "pdlp: infeas cert free col j=%d coef=%.2e tol=%.2e lower=%.2e upper=%.2e",
+                      j, aty_farkas[j], tol, lp.lower[j], lp.upper[j]);
+            }
           }
-        }
-        for (int i = 0; i < m; ++i) {
-          if (std::fabs(aty_farkas[lp.n + i]) > tol &&
-              (lp.lower[lp.n + i] <= -kInf / 2 || lp.upper[lp.n + i] >= kInf / 2)) {
-            log.log(2, "pdlp: infeas cert free row i=%d coef=%.2e tol=%.2e lower=%.2e upper=%.2e",
-                    i, aty_farkas[lp.n + i], tol, lp.lower[lp.n + i], lp.upper[lp.n + i]);
+          for (int i = 0; i < m; ++i) {
+            if (std::fabs(aty_farkas[lp.n + i]) > tol &&
+                (lp.lower[lp.n + i] <= -kInf / 2 || lp.upper[lp.n + i] >= kInf / 2)) {
+              log.log(3,
+                      "pdlp: infeas cert free row i=%d coef=%.2e tol=%.2e lower=%.2e upper=%.2e", i,
+                      aty_farkas[lp.n + i], tol, lp.lower[lp.n + i], lp.upper[lp.n + i]);
+            }
           }
         }
 
