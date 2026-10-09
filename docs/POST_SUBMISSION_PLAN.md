@@ -129,7 +129,13 @@ The LP is where MILP time goes (gen-ip054, pg5_34), and Netlib runs at about 2×
 3. **Faster infeasibility proofs:** take the dual ray as soon as phase 1 stalls with a
    certificate candidate. The target is the 0.10 s vs 0.008 s gap, and `cplex2` (infeasible by
    less than the tolerance) stays honestly "unproven".
-4. **Gate:**
+4. **Barrier ordering (found 8 October):** `minimum_degree_order` (`src/linalg/ordering.cpp`)
+   updates exact external degrees, which takes about 15 s on a 400 x 400 transportation LP
+   (160,000 columns) before the first barrier iteration, and the barrier's setup does not check
+   the time limit. Replace the degree update with AMD's approximate degrees (Amestoy, Davis and
+   Duff 1996), and check the limit between setup steps. Gate: the same fill on the random
+   quasi-definite tests, the ordering under 1 s on that LP.
+5. **Gate:**
    - Netlib geomean from 0.36 s to 0.25 s or better, with no lost instance and every answer
      verified;
    - the node rate on the MIPLIB set up, and the bound A/B no worse.

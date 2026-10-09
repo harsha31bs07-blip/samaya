@@ -318,6 +318,73 @@ TEST(miqp_random_models_match_brute_force) {
   CHECK(infeasible > 5);
 }
 
+namespace {
+
+// A transportation LP with random costs, s supplies of 100 and d demands of 100: easy to state,
+// slow for the dual simplex (160,000 columns at 400 x 400).
+Model transportation_lp(int s, int d, unsigned seed) {
+  std::mt19937 rng(seed);
+  std::uniform_int_distribution<int> cost(1, 1000);
+  Model m;
+  std::vector<samaya::Triplet> t;
+  for (int i = 0; i < s; ++i) {
+    for (int j = 0; j < d; ++j) {
+      const int col = i * d + j;
+      t.push_back({i, col, 1.0});
+      t.push_back({s + j, col, 1.0});
+      m.obj.push_back(cost(rng));
+      m.col_lower.push_back(0.0);
+      m.col_upper.push_back(samaya::kInf);
+      m.col_type.push_back(samaya::VarType::kContinuous);
+    }
+  }
+  m.A = samaya::SparseMatrix::from_triplets(s + d, s * d, std::move(t));
+  for (int i = 0; i < s; ++i) {
+    m.row_lower.push_back(-samaya::kInf);
+    m.row_upper.push_back(100.0);
+  }
+  for (int j = 0; j < d; ++j) {
+    m.row_lower.push_back(100.0);
+    m.row_upper.push_back(samaya::kInf);
+  }
+  return m;
+}
+
+}  // namespace
+
+TEST(lp_time_limit_holds_through_presolve_and_fallbacks) {
+  // When the presolved model hits the limit, the solve ends there: it used to solve the original
+  // model again with the whole limit, so the time grew twice as fast as the limit (0.5 s took
+  // 1.16 s in release). Presolve, PDLP's setup and crossover's fallback count against the limit
+  // too. Parts that cannot stop (reading presolve, setup) add a constant that depends on the
+  // build (release, debug, sanitizers), so the test compares two limits: their solve times must
+  // differ by about the difference of the limits, not twice it. (Not the barrier yet: its
+  // ordering takes about 15 s on this model before the first check of the limit;
+  // docs/POST_SUBMISSION_PLAN.md W4.)
+  const Model model = transportation_lp(500, 500, 7);
+  constexpr double kShort = 0.3;
+  constexpr double kLong = 0.6;
+  for (const bool crossover : {false, true}) {
+    double seconds[2] = {0.0, 0.0};
+    for (int k = 0; k < 2; ++k) {
+      Params params;
+      params.log_level = 0;
+      params.time_limit = k == 0 ? kShort : kLong;
+      if (crossover) {
+        params.lp_method = samaya::LpMethod::kPdlp;
+        params.crossover = true;
+      }
+      const Result r = Solver(params).solve(model);
+      CHECK(r.status == Status::kTimeLimit);
+      seconds[k] = r.solve_seconds;
+    }
+    std::printf("  %s: %.3f s at a %.1f s limit, %.3f s at %.1f s\n",
+                crossover ? "PDLP + crossover" : "dual simplex", seconds[0], kShort, seconds[1],
+                kLong);
+    CHECK(seconds[1] - seconds[0] < 1.5 * (kLong - kShort));
+  }
+}
+
 TEST(lp_methods_stop_at_the_time_limit) {
   // When the interior point or PDLP stops at the time limit, the solve ends there: no dual
   // simplex fallback runs past the limit (it used to get the whole limit again).

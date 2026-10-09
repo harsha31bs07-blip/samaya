@@ -248,6 +248,8 @@ PdlpResult solve_pdlp(const LpProblem& lp, const PdlpOptions& options, const Log
 namespace {
 
 PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, const Logger& log) {
+  // The time limit covers the setup too (equilibration, the norm estimate, the GPU upload).
+  const Timer timer;
   const int m = lp.m;
   const int n = lp.n;
   const int nt = n + m;
@@ -366,7 +368,6 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
     max_iter = std::max<long long>(10000LL, std::min<long long>(10000LL * (m + n) / 10, 1000000LL));
   }
 
-  Timer timer;
   // Largest column norm of A and largest row norm (column of At), for the relative residuals;
   // they do not change during the solve.
   double a_norm_max_col = 0.0;

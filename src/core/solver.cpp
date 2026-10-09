@@ -88,7 +88,11 @@ LpResult solve_lp_verified(const Model& model, const Params& params, const Logge
   LpResult lp;
   verified = false;
   long long iterations = 0;
+  const Timer timer;
   for (int a = 0; a < num_attempts; ++a) {
+    // The retries share the time limit with the first attempt.
+    attempts[a].simplex.time_limit = params.time_limit - timer.seconds();
+    if (a > 0 && attempts[a].simplex.time_limit <= 0.0) break;
     lp = solve_lp(model, attempts[a], log);
     iterations += lp.iterations;
     if (!params.verify) break;
@@ -105,8 +109,10 @@ LpResult solve_lp_verified(const Model& model, const Params& params, const Logge
 // (and leaves `lp` unspecified) when the caller should solve the original model instead: the
 // reduced model was not solved to a verified optimum, or presolve found infeasibility (the
 // original solve then produces a certificate for the original model).
-bool solve_presolved_lp(const Model& model, const Params& params, const Logger& log,
+bool solve_presolved_lp(const Model& model, const Params& requested, const Logger& log,
                         Result& result, LpResult& lp, long long& iterations) {
+  const Timer timer;
+  Params params = requested;
   Presolve presolve(model);
   if (presolve.run() != PresolveStatus::kReduced) {
     log.log(1, "Presolve: infeasibility detected; solving the original model for a certificate");
@@ -127,8 +133,15 @@ bool solve_presolved_lp(const Model& model, const Params& params, const Logger& 
   LpResult reduced_lp;
   if (reduced.num_cols() > 0) {
     bool verified = false;
+    params.time_limit = requested.time_limit - timer.seconds();  // Presolve counts too.
     reduced_lp = solve_lp_verified(reduced, params, log, result, verified);
     iterations += reduced_lp.iterations;
+    if (reduced_lp.status == SimplexStatus::kTimeLimit) {
+      // The limit is final: solving the original model as well used to double the time.
+      lp = LpResult{};
+      lp.status = SimplexStatus::kTimeLimit;
+      return true;
+    }
     if (reduced_lp.status != SimplexStatus::kOptimal || !verified) {
       log.log(1, "Presolved model: %s; solving the original model",
               to_string(reduced_lp.status));
@@ -477,12 +490,21 @@ void solve_lp_model(const Model& model, const Params& requested, const Logger& l
       result = interior;
       return;
     }
+    if (lp.status == SimplexStatus::kTimeLimit) {
+      // The limit is final here too: the dual simplex does not start over.
+      result.status = Status::kTimeLimit;
+      result.simplex_iterations = iterations;
+      return;
+    }
     crossed = accepted;
   }
   if (!crossed) {
+    // The dual simplex, and its fallback to the original model, get what is left of the limit.
+    params.time_limit = requested.time_limit - timer.seconds();
     if (params.presolve && solve_presolved_lp(model, params, log, result, lp, iterations)) {
       verified = params.verify;
     } else {
+      params.time_limit = requested.time_limit - timer.seconds();
       lp = solve_lp_verified(model, params, log, result, verified);
       iterations += lp.iterations;
     }
