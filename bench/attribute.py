@@ -8,6 +8,11 @@ component is off points at the technique samaya is missing there. The defaults a
 same machine, under the same load, so that "stops solving" compares like with like.
 
     bench/attribute.py [--time-limit 600] [--shards 4] [--out bench/results/attribution]
+    bench/attribute.py --configs highs:presolve_rule_* --only-lost-by highs:presolve_off
+    bench/attribute.py --configs scip:separator_* --instances n5-3,mc11 --list
+
+Fine-grained configs are opt-in. --instance-dir selects the MPS directory; the legacy
+--instances DIRECTORY form is also accepted. Quote globs if your shell expands them.
 
 Every run is single-threaded with the 1e-4 gap, like bench/compare.sh. Results are appended to
 OUT/runs.csv as they finish, so an interrupted run resumes where it stopped; OUT/summary.md is the
@@ -18,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fnmatch
 import multiprocessing
 import sys
 import time
@@ -56,6 +62,59 @@ CONFIGS = {
              "conflict_off"],
 }
 
+# HiGHS 1.15.1 highs/lp_data/HConst.h: PresolveRuleType. Bits 0--5 cannot
+# be disabled; HPresolveAnalysis::setup uses 1 << rule_type, not a shifted index.
+# Confirmed against the installed solver's "Presolve rules not allowed" log.
+HIGHS_PRESOLVE_RULE_BITS = {
+    "forcing_row": 6,
+    "forcing_col": 7,
+    "free_col_substitution": 8,
+    "doubleton_equation": 9,
+    "dependent_equations": 10,
+    "dependent_free_cols": 11,
+    "aggregator": 12,
+    "parallel_rows_and_cols": 13,
+    "sparsify": 14,
+    "probing": 15,
+    "enumeration": 16,
+    "dual_fixing": 17,
+    "col_stuffing": 18,
+    "initial_sweep": 19,
+}
+HIGHS_RULE_CONFIGS = {f"presolve_rule_{name}_off": 1 << bit
+                      for name, bit in HIGHS_PRESOLVE_RULE_BITS.items()}
+
+
+def separator_configs() -> dict[str, str]:
+    """Discover only separator plugins present in this SCIP installation."""
+    import pyscipopt
+
+    model = pyscipopt.Model()
+    return {f"separator_{param.split('/')[1]}_off": param
+            for param in sorted(model.getParams())
+            if param.startswith("separating/") and param.endswith("/freq")
+            and len(param.split('/')) == 3}
+
+
+def select_configs(patterns: list[str] | None) -> dict[str, list[str]]:
+    if patterns is None:
+        return {solver: list(configs) for solver, configs in CONFIGS.items()}
+    available = {"highs": CONFIGS["highs"] + list(HIGHS_RULE_CONFIGS),
+                 "scip": list(CONFIGS["scip"])}
+    # Default jobs should not need either solver installed merely to list them.
+    if any(p.startswith("scip:") for p in patterns):
+        available["scip"] += list(separator_configs())
+    selected = {solver: [] for solver in CONFIGS}
+    for pattern in patterns:
+        solver, sep, glob = pattern.partition(":")
+        if not sep or solver not in available or not glob:
+            raise ValueError(f"expected solver:glob, got {pattern!r}")
+        matches = [c for c in available[solver] if fnmatch.fnmatchcase(c, glob)]
+        if not matches:
+            raise ValueError(f"no configs match {pattern!r}")
+        selected[solver].extend(c for c in matches if c not in selected[solver])
+    return selected
+
 
 def run_highs(instance: Path, config: str, time_limit: float) -> dict:
     import highspy
@@ -71,6 +130,9 @@ def run_highs(instance: Path, config: str, time_limit: float) -> dict:
         h.setOptionValue("mip_detect_symmetry", False)
     elif config == "heuristics_off":
         h.setOptionValue("mip_heuristic_effort", 0.0)
+    elif config in HIGHS_RULE_CONFIGS:
+        if h.setOptionValue("presolve_rule_off", HIGHS_RULE_CONFIGS[config]) != highspy.HighsStatus.kOk:
+            raise ValueError(f"HiGHS rejected presolve_rule_off for {config}")
     h.readModel(str(instance))
     start = time.perf_counter()
     h.run()
@@ -100,6 +162,11 @@ def run_scip(instance: Path, config: str, time_limit: float) -> dict:
         m.setParam("misc/usesymmetry", 0)
     elif config == "conflict_off":
         m.setParam("conflict/enable", False)
+    elif config.startswith("separator_") and config.endswith("_off"):
+        # SCIP's freq=-1 means never, including the root; maxroundsroot is
+        # only a cap on calls and does not override this scheduling switch.
+        name = config[len("separator_"):-len("_off")]
+        m.setParam(f"separating/{name}/freq", -1)
     start = time.perf_counter()
     m.optimize()
     seconds = time.perf_counter() - start
@@ -144,6 +211,29 @@ def write_summary(rows: list[dict], out: Path, time_limit: float) -> None:
                     cells.append("TL" if r["status"] == "time_limit" else r["status"])
             lines.append(f"| {name} | " + " | ".join(cells) + " |")
         lines.append("")
+    # Keep the original component tables intact. Add only families represented
+    # in the CSV, so a legacy/default run produces the same summary as before.
+    for solver, prefix, title in (("highs", "presolve_rule_", "presolve rules"),
+                                   ("scip", "separator_", "separators")):
+        configs = sorted({r["config"] for r in rows
+                          if r["solver"] == solver and r["config"].startswith(prefix)})
+        if not configs:
+            continue
+        names = [n for n, s in LOST.items() if solver in s]
+        lines += [f"## {solver} {title}", "", "| Instance | " + " | ".join(configs) + " |",
+                  "|---|" + "---|" * len(configs)]
+        for name in names:
+            cells = []
+            for config in configs:
+                r = by.get((name, solver, config))
+                if r is None:
+                    cells.append("–")
+                elif solved(r):
+                    cells.append(f"{float(r['seconds']):.0f}")
+                else:
+                    cells.append("TL" if r["status"] == "time_limit" else r["status"])
+            lines.append(f"| {name} | " + " | ".join(cells) + " |")
+        lines.append("")
     (out / "summary.md").write_text("\n".join(lines))
 
 
@@ -151,12 +241,36 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--time-limit", type=float, default=600.0)
     parser.add_argument("--shards", type=int, default=4)
-    parser.add_argument("--instances", type=Path, default=REPO / "bench" / "instances" / "miplib_small")
+    parser.add_argument("--instances", help="comma-separated LOST names (or a legacy MPS directory)")
+    parser.add_argument("--instance-dir", type=Path,
+                        default=REPO / "bench" / "instances" / "miplib_small")
+    parser.add_argument("--configs", action="append", nargs="+", metavar="SOLVER:GLOB",
+                        help="select configs; repeat or supply multiple solver:glob patterns")
+    parser.add_argument("--only-lost-by", metavar="SOLVER:CONFIG",
+                        help="keep instances solved by default but unsolved with this config in OUT/runs.csv")
+    parser.add_argument("--list", action="store_true", help="list pending jobs without solving or requiring MPS files")
     parser.add_argument("--out", type=Path, default=REPO / "bench" / "results" / "attribution")
     args = parser.parse_args()
-    args.out.mkdir(parents=True, exist_ok=True)
+    try:
+        configs = select_configs([p for group in args.configs for p in group]
+                                 if args.configs is not None else None)
+    except (ValueError, ImportError) as exc:
+        parser.error(str(exc))
+    names = set(LOST)
+    if args.instances is not None:
+        # Preserve the old --instances directory form, including missing paths
+        # containing a directory separator; bare names are the new filter.
+        if Path(args.instances).is_dir() or "/" in args.instances or "\\" in args.instances:
+            args.instance_dir = Path(args.instances)
+        else:
+            names = set(args.instances.split(","))
+            unknown = names - LOST.keys()
+            if unknown:
+                parser.error("unknown instances: " + ", ".join(sorted(unknown)))
     runs_csv = args.out / "runs.csv"
     fields = ["instance", "solver", "config", "status", "seconds", "nodes"]
+    if not args.list:
+        args.out.mkdir(parents=True, exist_ok=True)
 
     done: list[dict] = []
     if runs_csv.exists():
@@ -164,18 +278,40 @@ def main() -> int:
             done = list(csv.DictReader(f))
     finished = {(r["instance"], r["solver"], r["config"]) for r in done}
 
+    if args.only_lost_by:
+        solver, sep, config = args.only_lost_by.partition(":")
+        if not sep or solver not in CONFIGS or not config:
+            parser.error("--only-lost-by requires solver:config")
+        if not runs_csv.exists():
+            parser.error(f"--only-lost-by requires previous results in {runs_csv}")
+        by = {(r["instance"], r["solver"], r["config"]): r for r in done}
+        if not any(r["solver"] == solver and r["config"] == config for r in done):
+            parser.error(f"no previous results for {args.only_lost_by}")
+        names &= {name for name in LOST
+                  if (name, solver, "default") in by
+                  and solved(by[name, solver, "default"])
+                  and (name, solver, config) in by
+                  and not solved(by[name, solver, config])
+                  and not by[name, solver, config]["status"].startswith("error:")}
+
     jobs = []
     for name, solvers in LOST.items():
-        path = args.instances / f"{name}.mps"
-        if not path.exists():
+        if name not in names:
+            continue
+        path = args.instance_dir / f"{name}.mps"
+        if not args.list and any(configs[solver] for solver in solvers) and not path.exists():
             print(f"missing instance {path}", file=sys.stderr)
             return 1
         for solver in solvers:
-            for config in CONFIGS[solver]:
+            for config in configs[solver]:
                 if (name, solver, config) not in finished:
                     jobs.append((name, str(path), solver, config, args.time_limit))
     print(f"{len(jobs)} runs to do ({len(finished)} already done), {args.shards} at a time",
           flush=True)
+    if args.list:
+        for name, _, solver, config, _ in jobs:
+            print(f"{solver} {name} {config}")
+        return 0
 
     new_file = not runs_csv.exists()
     with runs_csv.open("a", newline="") as f:
