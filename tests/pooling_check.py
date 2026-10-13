@@ -171,9 +171,12 @@ def main() -> None:
                 print(f"{name} {point_key}: feasible, objective {objective:g}")
             path = temporary / f"{name}.mps"
             generate("--haverly", str(number), "--out", str(path))
-            require(path.read_bytes() == (fixtures / path.name).read_bytes(),
+            # Line endings aside: a Windows checkout with core.autocrlf turns the committed LF
+            # fixtures into CRLF, while the generator writes LF.
+            require(path.read_bytes().replace(b"\r\n", b"\n")
+                    == (fixtures / path.name).read_bytes().replace(b"\r\n", b"\n"),
                     f"{name} regeneration differs")
-            print(f"{name} regeneration: byte-for-byte match")
+            print(f"{name} regeneration: identical up to line endings")
 
         # A dropped bilinear term must fail the independent primal check.
         model = read_mps(fixtures / "haverly1.mps")
