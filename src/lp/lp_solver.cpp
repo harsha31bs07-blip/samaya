@@ -115,6 +115,7 @@ LpResult solve_lp(const Model& model, const LpSolveOptions& options, const Logge
   result.row_activity.assign(static_cast<std::size_t>(m), 0.0);
   model.A.multiply(result.col_value, result.row_activity);
 
+  result.basis = simplex->status();  // Statuses do not depend on scaling.
   result.row_dual = simplex->duals();
   scaling.unscale_row_duals(result.row_dual);
   for (double& y : result.row_dual) y *= sense;

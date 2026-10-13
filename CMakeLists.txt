@@ -104,6 +104,7 @@ add_library(samaya
   src/mip/feasibility_jump.cpp
   src/presolve/presolve.cpp
   src/qp/miqp.cpp
+  src/slp/slp.cpp
   src/linalg/scaling.cpp
   src/linalg/sparse_matrix.cpp
   src/verify/verify.cpp

@@ -20,6 +20,9 @@ struct LpResult {
   std::vector<double> col_dual;        // Reduced costs (n).
   std::vector<double> dual_ray;        // Farkas certificate when infeasible (m).
   std::vector<double> primal_ray;      // Improving direction when unbounded (n).
+  // Final statuses of the simplex that produced the answer (n + m, computational form); a warm
+  // start for the next solve of a model with the same rows and columns (SLP, docs/SLP_PLAN.md).
+  std::vector<VarStatus> basis;
   long long iterations = 0;
   SimplexStats stats;
 };

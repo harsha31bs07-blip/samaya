@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "core/log.hpp"
+#include "core/lp_verified.hpp"
 #include "core/xreal.hpp"
 #include "lp/crossover.hpp"
 #include "lp/ipm.hpp"
@@ -15,6 +16,7 @@
 #include "presolve/presolve.hpp"
 #include "qp/miqp.hpp"
 #include "samaya/verify.hpp"
+#include "slp/slp.hpp"
 
 #ifndef SAMAYA_VERSION_STRING
 #define SAMAYA_VERSION_STRING "0.0.0"
@@ -45,8 +47,9 @@ Status to_status(SimplexStatus s) {
   return Status::kNumericalError;
 }
 
-// Runs the independent verifier on an LP outcome. Returns true when the claim is proven (or is a
-// limit status, which claims nothing).
+}  // namespace
+
+// Declared in core/lp_verified.hpp: the SLP (src/slp/) solves its LPs through these too.
 bool verify_lp(const Model& model, const LpResult& lp, Result& result) {
   VerifyReport report;
   switch (lp.status) {
@@ -68,13 +71,9 @@ bool verify_lp(const Model& model, const LpResult& lp, Result& result) {
   return report.ok;
 }
 
-// Solves an LP with the dual simplex. If the outcome fails verification the solve is repeated
-// with tighter tolerances and then without scaling. Returns the last outcome; `verified` says
-// whether it passed (limit statuses claim nothing and count as verified).
 LpResult solve_lp_verified(const Model& model, const Params& params, const Logger& log,
-                           Result& result, bool& verified,
-                           const std::vector<VarStatus>& start = {},
-                           long long max_iterations = -1) {
+                           Result& result, bool& verified, const std::vector<VarStatus>& start,
+                           long long max_iterations) {
   LpSolveOptions attempts[3];
   attempts[0] = lp_options_from_params(params);
   attempts[0].start = start;
@@ -105,6 +104,8 @@ LpResult solve_lp_verified(const Model& model, const Params& params, const Logge
   lp.iterations = iterations;
   return lp;
 }
+
+namespace {
 
 // Presolves the LP, solves the reduced model and maps an optimal solution back. Returns false
 // (and leaves `lp` unspecified) when the caller should solve the original model instead: the
@@ -668,12 +669,15 @@ Result Solver::solve(const Model& model) const {
       solve_miqp_model(model, params_, log, result);
       break;
     case ProblemClass::kQCP:
-      // Quadratic rows (docs/SLP_PLAN.md). Refused, never passed to code that would ignore
-      // them: with integers or a quadratic objective for good, and until the SLP lands for now.
-      result.status = Status::kNotImplemented;
-      result.message = model.is_mip()   ? "quadratic rows with integer columns are not supported"
-                       : model.is_qp() ? "quadratic rows with a quadratic objective are not supported"
-                                       : "quadratic rows (SLP) are not available yet";
+      // Quadratic rows (docs/SLP_PLAN.md): SLP for continuous columns and a linear objective;
+      // refused, never passed to code that would ignore the rows, otherwise.
+      if (model.is_mip() || model.is_qp()) {
+        result.status = Status::kNotImplemented;
+        result.message = model.is_mip() ? "quadratic rows with integer columns are not supported"
+                                        : "quadratic rows with a quadratic objective are not supported";
+      } else {
+        solve_qcp(model, params_, log, result);
+      }
       break;
   }
 

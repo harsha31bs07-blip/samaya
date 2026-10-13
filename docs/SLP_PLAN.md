@@ -149,6 +149,32 @@ from the simplex that produced the answer, for the warm starts; the dispatch hun
   term left without trust bounds (caught by a direct check on LP_k's bounds, not by Haverly's
   objective); σ dropped for a maximization (elastics rewarded).
 
+## 5a. What the implementation changed (13 October)
+
+Found while testing Haverly 1–3 from the default start:
+- **Empty pools at the start.** Flows at their lower bound 0 leave the pool quality without a
+  first-order effect, and the first LP stops at objective 0, a valid but useless KKT point.
+  Columns in quadratic terms with one finite bound now start one unit inside it.
+- **Scales follow the iterate.** A column without a usable finite range is scaled by
+  max(initial scale, |x_k|), not by its value at the start: flows grown from 1 to 100 were
+  still limited to steps of 0.2 (Haverly 3 crawled for 200 iterations).
+- **Second-order correction is needed, not optional.** Without it, steps that satisfy the
+  linearized rows leave a curvature residual the next LP again predicts to remove; the ratio
+  stayed near 0.63, the radius never grew, and Haverly 3 stalled at -718 of -750. With it:
+  -750 in 12 iterations. The planted "correction never taken" bug fails that test.
+- **The projection pulls every column the caller gave a value for,** not only the columns in
+  quadratic terms; otherwise a linear column lands on an arbitrary vertex and the loop starts
+  with a violation the start did not have.
+
+Open: columns whose linearized gradient is zero (u, v near u = v = 0 in z = uv) can jump to
+arbitrary trust-region corners. A small L1 proximal term (|x - x_k| through two more columns per
+such column) would keep them at the center. Haverly does not need it; add it when a case does.
+
+Results now (Windows release): Haverly 1, 2, 3 from near-global starts: -400, -600, -750 (the
+global optima); from the trap starts: -100, -400, -125 (stationary, as derived); from the
+default start: -400 (global), -400 (stationary local), -750 (global). All verified by
+`verify_qcp_kkt`.
+
 ## 6. Who does what
 
 | Part | Who |

@@ -179,20 +179,24 @@ TEST(solver_solves_and_verifies_lp_outcomes) {
   CHECK(!r.verified);
 }
 
-TEST(solver_refuses_quadratic_rows_it_cannot_solve) {
-  // x y <= 4 with 0 <= x, y <= 10: until the SLP lands every QCP is refused, and with integers
-  // or a quadratic objective it stays refused; none of them may reach the MILP or QP code.
+TEST(solver_solves_or_refuses_quadratic_rows) {
+  // min x + y, x y >= 4, 0 <= x, y <= 10 (a convex region; its only KKT point is (2, 2)): the SLP
+  // reports it as stationary, never optimal. With integers or a quadratic objective the model is
+  // refused, so it never reaches the MILP or QP code, which would ignore the quadratic row.
   samaya::Model m;
-  m.obj = {-1, -1};
+  m.obj = {1, 1};
   m.col_lower = {0, 0};
   m.col_upper = {10, 10};
   m.col_type.assign(2, samaya::VarType::kContinuous);
-  m.row_lower = {-samaya::kInf};
-  m.row_upper = {4};
+  m.row_lower = {4};
+  m.row_upper = {samaya::kInf};
   m.A = samaya::SparseMatrix(1, 2);
   m.row_quadratic = {{0, 0, 1, 1.0}};
   const samaya::Solver solver;
-  CHECK(solver.solve(m).status == samaya::Status::kNotImplemented);
+  const samaya::Result qcp = solver.solve(m);
+  CHECK(qcp.status == samaya::Status::kFirstOrderStationary);
+  CHECK(qcp.verified);
+  CHECK(std::fabs(qcp.objective - 4.0) <= 1e-6);
   samaya::Model mip = m;
   mip.col_type[0] = samaya::VarType::kInteger;
   const samaya::Result r = solver.solve(mip);

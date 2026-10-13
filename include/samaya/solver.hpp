@@ -66,6 +66,10 @@ struct Result {
   long long nodes = 0;
   // The answer is the simplex's, started from a crossover basis after barrier or PDLP.
   bool crossover = false;
+  // QCP (quadratic rows) by SLP: the LP iterations taken, and the largest relative violation of
+  // a quadratic row at the reported point, as the verifier measures it.
+  long long slp_iterations = 0;
+  double max_nonlinear_violation = 0.0;
 };
 
 class Solver {
