@@ -65,6 +65,7 @@ void add_stats(SimplexStats& total, const SimplexStats& s) {
 
 LpResult solve_lp(const Model& model, const LpSolveOptions& options, const Logger& log) {
   assert(model.Q.empty());
+  const Timer timer;
   const Index m = model.num_rows();
   const Index n = model.num_cols();
   const double sense = model.sense == ObjSense::kMaximize ? -1.0 : 1.0;
@@ -83,12 +84,15 @@ LpResult solve_lp(const Model& model, const LpSolveOptions& options, const Logge
   result.iterations = simplex->iterations();
   result.stats = simplex->stats();
 
-  if (options.scale && result.status == SimplexStatus::kOptimal) {
+  // The cleanup shares the time limit: it gets what the scaled solve left, not a fresh allowance.
+  SimplexOptions polish_options = options.simplex;
+  polish_options.time_limit = options.simplex.time_limit - timer.seconds();
+  if (options.scale && result.status == SimplexStatus::kOptimal && polish_options.time_limit > 0.0) {
     // Tolerances met in the scaled space can be violated once unscaled (reduced costs are divided
     // by the column scale factors). Continue on the unscaled problem from the optimal basis; this
     // usually needs no iterations. If it fails, the scaled solution is kept.
     unscaled_lp = make_problem(model, identity);
-    auto polish = std::make_unique<Simplex>(unscaled_lp, options.simplex, log);
+    auto polish = std::make_unique<Simplex>(unscaled_lp, polish_options, log);
     const SimplexStatus status = polish->solve(simplex->status());
     result.iterations += polish->iterations();
     add_stats(result.stats, polish->stats());

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+#include <string>
 #include <vector>
 
 #include "core/xreal.hpp"
@@ -86,10 +88,23 @@ VerifyReport verify_primal(const Model& model, std::span<const double> x,
     }
   }
   add_quadratic_rows(model, x, activity, magnitude);
+  std::vector<char> quadratic_row(static_cast<std::size_t>(m), 0);
+  for (const RowQuadraticTerm& t : model.row_quadratic) quadratic_row[t.row] = 1;
   for (Index i = 0; i < m; ++i) {
-    const double v = bound_violation(static_cast<double>(activity[i]), model.row_lower[i],
-                                     model.row_upper[i], magnitude[i]);
+    const double act = static_cast<double>(activity[i]);
+    // Overflow (finite data, 1e200 squared) gives an infinite or NaN activity, and every
+    // comparison with NaN is false: never let that pass as feasible.
+    if (!std::isfinite(act) || !std::isfinite(magnitude[i])) {
+      report.ok = false;
+      report.max_row_violation = std::numeric_limits<double>::infinity();
+      if (report.message.empty()) report.message = "row " + std::to_string(i) + " activity is not finite";
+      continue;
+    }
+    const double v = bound_violation(act, model.row_lower[i], model.row_upper[i], magnitude[i]);
     report.max_row_violation = std::max(report.max_row_violation, v);
+    if (quadratic_row[i]) {
+      report.max_quadratic_row_violation = std::max(report.max_quadratic_row_violation, v);
+    }
     fail(report, v, tol.primal, "row", i);
   }
 
@@ -191,6 +206,15 @@ VerifyReport verify_kkt(const Model& model, std::span<const double> x, std::span
           std::max(magnitude[index[p]], std::fabs(value[p] * x[j]));
     }
     const double dj = sense * static_cast<double>(d);
+    if (!std::isfinite(dj) || !std::isfinite(scale)) {
+      // Overflowing derivative sums must not pass as a zero reduced cost.
+      report.ok = false;
+      report.max_dual_violation = std::numeric_limits<double>::infinity();
+      if (report.message.empty()) {
+        report.message = "reduced cost of column " + std::to_string(j) + " is not finite";
+      }
+      continue;
+    }
     const bool lower = at_bound(x[j], model.col_lower[j], 0.0);
     const bool upper = at_bound(x[j], model.col_upper[j], 0.0);
     double violation = 0.0;

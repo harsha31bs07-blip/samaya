@@ -45,7 +45,8 @@ constexpr double kRangeScaleCap = 1e6;
 // Weighted violation below which elastics count as zero (an absolute floor; the final verdict
 // is the verifier's, with its own relative tolerances).
 constexpr double kViolationFloor = 1e-9;
-// Predicted reductions below this (relative to the merit) are treated as zero: no division.
+// Predicted reductions below this, relative to the size of the terms that make up the change
+// (not to the merit, which can carry a large constant), are treated as zero: no division.
 constexpr double kPredictedFloor = 1e-12;
 
 class Slp {
@@ -84,7 +85,6 @@ class Slp {
 
   std::vector<double> activities(const std::vector<double>& x) const;
   double violation(const std::vector<double>& x) const;  // V(x), weighted.
-  double merit(const std::vector<double>& x, double mu) const;
   double objective(const std::vector<double>& x) const;  // sigma c'x
 
   Model linearization(const std::vector<double>& center, double radius, double mu,
@@ -144,10 +144,6 @@ double Slp::objective(const std::vector<double>& x) const {
   double f = 0.0;
   for (Index j = 0; j < n_; ++j) f += cost_[j] * x[j];
   return f;
-}
-
-double Slp::merit(const std::vector<double>& x, double mu) const {
-  return objective(x) + mu * violation(x);
 }
 
 // LP_k (4.3, 4.4): columns x then (p_k, n_k) per nonlinear row; each nonlinear row linearized
@@ -211,6 +207,13 @@ Model Slp::linearization(const std::vector<double>& center, double radius, doubl
 // Solves an LP through solve_lp_verified with verification on; true only for a verified optimum
 // (the helper also passes limit statuses, which claim nothing).
 bool Slp::solve(const Model& lp, std::vector<VarStatus>* basis, LpResult& out) {
+  // An overflowing linearization (finite data, 1e200 squared) gives infinite or NaN coefficients
+  // and bounds; fail instead of solving an LP that no longer says what the model says.
+  if (!lp.validate().empty() || !lp.crossed_bounds().empty()) {
+    out = LpResult{};
+    out.status = SimplexStatus::kNumericalError;
+    return false;
+  }
   Params p = params_;
   p.verify = true;
   p.time_limit = remaining();
@@ -360,6 +363,7 @@ void Slp::prove_linear_infeasibility(Result& result) {
   std::fill(lp.obj.begin(), lp.obj.end(), 0.0);
   LpResult out;
   solve(lp, nullptr, out);
+  result.simplex_iterations = simplex_iterations_;
   result.status = Status::kNumericalError;
   result.message = "the linear rows look infeasible, but no certificate was found";
   if (out.status == SimplexStatus::kInfeasible) {
@@ -413,18 +417,8 @@ void Slp::report_point(const std::vector<double>& x, Status status, const std::s
   result.objective = primal.objective;
   result.dual_bound = std::numeric_limits<double>::quiet_NaN();
   result.max_primal_violation = std::max(primal.max_bound_violation, primal.max_row_violation);
-  // The worst quadratic row, measured as the verifier measures rows.
-  double worst = 0.0;
-  const std::vector<double>& h = result.row_activity;
-  for (const Index i : nl_rows_) {
-    const double lo = model_.row_lower[i];
-    const double up = model_.row_upper[i];
-    double v = 0.0;
-    if (h[i] < lo) v = (lo - h[i]) / (1.0 + std::fabs(lo));
-    if (h[i] > up) v = (h[i] - up) / (1.0 + std::fabs(up));
-    worst = std::max(worst, v);
-  }
-  result.max_nonlinear_violation = worst;
+  // The worst quadratic row, as the verifier measures it (extended precision, its scaling).
+  result.max_nonlinear_violation = primal.max_quadratic_row_violation;
   result.verified = status != Status::kFirstOrderStationary && primal.ok;
   result.simplex_iterations = simplex_iterations_;
 }
@@ -457,55 +451,95 @@ void Slp::run(Result& result) {
   for (const double c : cost_) mu = std::max(mu, 10.0 * std::fabs(c));
   double radius = kInitialRadius;
   std::vector<VarStatus> basis;
-  long long iteration = 0;
-  for (; iteration < kMaxIterations; ++iteration) {
+  long long completed = 0;  // Outer iterations whose LP_k was solved (or attempted).
+  const auto finish = [&](Status status, const std::string& message) {
+    report_point(x, status, message, result);
+    result.slp_iterations = completed;
+  };
+  while (completed < kMaxIterations) {
     if (remaining() <= 0.0) {
-      report_point(x, Status::kTimeLimit, "time limit before stationarity", result);
-      result.slp_iterations = iteration;
+      finish(Status::kTimeLimit, "time limit before stationarity");
       return;
     }
     const double v_now = violation(x);
     LpResult step;
     bool solved = solve(linearization(x, radius, mu, false), &basis, step);
-    // 4.6: steer the penalty while the step leaves violation the feasibility LP could remove.
-    for (int raise = 0; solved && raise < kMaxPenaltyRaisesPerIteration && mu < kMaxPenalty &&
-                        v_now > kViolationFloor && elastic_sum(step) > kViolationFloor;
-         ++raise) {
-      LpResult feasibility;
-      std::vector<VarStatus> feasibility_basis = basis;
-      if (!solve(linearization(x, radius, mu, true), &feasibility_basis, feasibility)) break;
-      const double possible = v_now - elastic_sum(feasibility);
-      const double achieved = v_now - elastic_sum(step);
-      if (possible < kSteeringMinReduction * v_now || achieved >= kSteeringShare * possible) break;
+    ++completed;
+    // 4.6: steer the penalty, while the step leaves violation the feasibility LP could remove,
+    // or while the LP is unbounded through its elastics (buying violation for objective at a
+    // price below the objective's rate: z <= 100 x^2 at mu w = 0.05 had no bounded LP).
+    for (int raise = 0; raise < kMaxPenaltyRaisesPerIteration && mu < kMaxPenalty; ++raise) {
+      bool raise_mu = false;
+      if (!solved && step.status == SimplexStatus::kUnbounded) {
+        for (Index k = n_; k < static_cast<Index>(step.primal_ray.size()); ++k) {
+          raise_mu = raise_mu || step.primal_ray[k] != 0.0;
+        }
+      } else if (solved && v_now > kViolationFloor && elastic_sum(step) > kViolationFloor) {
+        LpResult feasibility;
+        std::vector<VarStatus> feasibility_basis = basis;
+        if (solve(linearization(x, radius, mu, true), &feasibility_basis, feasibility)) {
+          const double possible = v_now - elastic_sum(feasibility);
+          const double achieved = v_now - elastic_sum(step);
+          raise_mu = possible >= kSteeringMinReduction * v_now &&
+                     achieved < kSteeringShare * possible;
+        }
+      }
+      if (!raise_mu) break;
       mu = std::min(kMaxPenalty, mu * kPenaltyGrowth);
       solved = solve(linearization(x, radius, mu, false), &basis, step);
     }
-    if (!solved) {
-      if (step.status == SimplexStatus::kUnbounded) {
-        // Unbounded along columns outside the quadratic terms (those have trust bounds): the
-        // quadratic rows do not change along the ray, so the original model is unbounded too.
-        std::vector<double> ray(step.primal_ray.begin(), step.primal_ray.begin() + n_);
-        bool linear_only = true;
-        for (Index j = 0; j < n_; ++j) linear_only = linear_only && (!nonlinear_col_[j] || ray[j] == 0.0);
-        if (linear_only && verify_unbounded_ray(model_, ray).ok) {
-          report_point(x, Status::kUnbounded, "unbounded along columns outside quadratic terms",
-                       result);
-          result.unbounded_ray = std::move(ray);
-          result.verified = true;
-          result.slp_iterations = iteration;
-          return;
+    if (!solved && step.status == SimplexStatus::kUnbounded) {
+      // Unbounded along columns outside the quadratic terms (those have trust bounds) and not
+      // through the elastics: the quadratic rows do not change along the ray. That proves the
+      // model unbounded only from a feasible point of the original model (a ray alone does not:
+      // x^2 = -1 has none). Without one, take a restoration step instead.
+      std::vector<double> ray(step.primal_ray.begin(), step.primal_ray.begin() + n_);
+      bool linear_only = true;
+      for (Index j = 0; j < n_; ++j) linear_only = linear_only && (!nonlinear_col_[j] || ray[j] == 0.0);
+      for (Index k = n_; k < static_cast<Index>(step.primal_ray.size()); ++k) {
+        linear_only = linear_only && step.primal_ray[k] == 0.0;
+      }
+      if (linear_only && verify_primal(model_, x).ok && verify_unbounded_ray(model_, ray).ok) {
+        finish(Status::kUnbounded, "unbounded along columns outside quadratic terms");
+        result.unbounded_ray = std::move(ray);
+        result.verified = true;
+        return;
+      }
+      LpResult restoration;
+      std::vector<VarStatus> restoration_basis = basis;
+      if (solve(linearization(x, radius, mu, true), &restoration_basis, restoration)) {
+        std::vector<double> restored(restoration.col_value.begin(),
+                                     restoration.col_value.begin() + n_);
+        if (violation(restored) < v_now) {
+          x = std::move(restored);
+          for (Index j = 0; j < n_; ++j) {
+            if (relative_scale_[j]) scale_[j] = std::max(base_scale_[j], std::fabs(x[j]));
+          }
+          continue;
         }
       }
-      report_point(x, step.status == SimplexStatus::kTimeLimit ? Status::kTimeLimit
-                                                                : Status::kNumericalError,
-                   std::string("an LP of the SLP loop ended ") + to_string(step.status), result);
-      result.slp_iterations = iteration;
+      radius *= kShrinkFactor;
+      if (radius < kMinRadius) break;
+      continue;
+    }
+    if (!solved) {
+      finish(step.status == SimplexStatus::kTimeLimit ? Status::kTimeLimit : Status::kNumericalError,
+             std::string("an LP of the SLP loop ended ") + to_string(step.status));
       return;
     }
 
     std::vector<double> trial(step.col_value.begin(), step.col_value.begin() + n_);
-    const double phi = merit(x, mu);
-    const double predicted = objective(x) - objective(trial) + mu * (v_now - elastic_sum(step));
+    // Changes are summed from the step itself, sigma c'(x - trial), not as a difference of two
+    // objective values: a large constant term (t = 1e12) would swamp both the difference and a
+    // threshold relative to the merit.
+    const auto objective_decrease = [&](const std::vector<double>& to) {
+      double d = 0.0;
+      for (Index j = 0; j < n_; ++j) d += cost_[j] * (x[j] - to[j]);
+      return d;
+    };
+    double change_scale = 1.0 + mu * v_now;
+    for (Index j = 0; j < n_; ++j) change_scale += std::fabs(cost_[j] * (x[j] - trial[j]));
+    const double predicted = objective_decrease(trial) + mu * (v_now - elastic_sum(step));
     double moved = 0.0;
     double moved_nonlinear = 0.0;
     for (Index j = 0; j < n_; ++j) {
@@ -513,22 +547,27 @@ void Slp::run(Result& result) {
       moved = std::max(moved, s);
       if (nonlinear_col_[j]) moved_nonlinear = std::max(moved_nonlinear, s);
     }
-    if (predicted <= kPredictedFloor * (1.0 + std::fabs(phi)) || moved <= kStepTol) {
+    if (predicted <= kPredictedFloor * change_scale || moved <= kStepTol) {
       // No predicted progress: x is optimal for its own LP. Certify it, or shrink and retry.
       if (stationary(x, step, result)) {
-        result.slp_iterations = iteration + 1;
+        result.slp_iterations = completed;
         log_.log(1, "SLP: first-order stationary point after %lld iterations, objective %.12g",
-                 iteration + 1, result.objective);
+                 completed, result.objective);
         return;
       }
       radius *= kShrinkFactor;
     } else {
-      double rho = (phi - merit(trial, mu)) / predicted;
+      const auto actual = [&](const std::vector<double>& to) {
+        return objective_decrease(to) + mu * (v_now - violation(to));
+      };
+      double rho = actual(trial) / predicted;
       // 4.7: second-order correction. A step that satisfies the linearized rows leaves the
       // curvature's residual (v s_a s_b) in them, which the next LP again predicts to remove:
       // the ratio stays low and the radius cannot grow (Haverly 3 from the default start
-      // crawled at a ratio near 0.63). One LP linearized at the trial point, over a small
-      // radius, removes that residual; its point replaces the trial when the ratio improves.
+      // crawled at a ratio near 0.63). One LP linearized at the trial point, over a small radius
+      // and with the objective kept, removes that residual; its point replaces the trial when
+      // its true merit decrease against the original prediction is larger (a sufficient-decrease
+      // safeguard: acceptance still needs actual > 0.1 predicted).
       if (rho < kExpandRatio && violation(trial) > kViolationFloor) {
         LpResult correction;
         std::vector<VarStatus> correction_basis = basis;
@@ -536,7 +575,7 @@ void Slp::run(Result& result) {
                   &correction_basis, correction)) {
           std::vector<double> corrected(correction.col_value.begin(),
                                         correction.col_value.begin() + n_);
-          const double rho_corrected = (phi - merit(corrected, mu)) / predicted;
+          const double rho_corrected = actual(corrected) / predicted;
           if (rho_corrected > rho) {
             trial = std::move(corrected);
             rho = rho_corrected;
@@ -558,19 +597,15 @@ void Slp::run(Result& result) {
         radius *= kShrinkFactor;
       }
       log_.log(2, "SLP %lld: objective %.10g violation %.3e radius %.2e penalty %.1e ratio %.3f",
-               iteration + 1, sigma_ * objective(x), violation(x), radius, mu, rho);
+               completed, sigma_ * objective(x), violation(x), radius, mu, rho);
     }
     if (radius < kMinRadius) break;
   }
   const bool feasible = verify_primal(model_, x).ok;
-  report_point(x, Status::kIterationLimit,
-               feasible ? "stalled before stationarity (feasible point)"
-                        : "no feasible point found from this start",
-               result);
-  result.slp_iterations = iteration;
-  log_.log(1, "SLP: %s after %lld iterations", result.message.c_str(), iteration);
+  finish(Status::kIterationLimit, feasible ? "stalled before stationarity (feasible point)"
+                                           : "no feasible point found from this start");
+  log_.log(1, "SLP: %s after %lld iterations", result.message.c_str(), completed);
 }
-
 }  // namespace
 
 void solve_qcp(const Model& model, const Params& params, const Logger& log, Result& result) {

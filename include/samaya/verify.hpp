@@ -26,6 +26,8 @@ struct VerifyReport {
   double max_row_violation = 0.0;
   double max_integrality_violation = 0.0;
   double max_dual_violation = 0.0;
+  // The largest relative violation among rows with quadratic terms (part of max_row_violation).
+  double max_quadratic_row_violation = 0.0;
   double objective = 0.0;  // c'x + 1/2 x'Qx + offset, summed in extended precision.
   std::string message;     // Describes the worst failure when !ok.
 };

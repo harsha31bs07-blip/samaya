@@ -255,3 +255,87 @@ TEST(slp_haverly_as_a_maximization) {
   CHECK(near(r.objective, 400.0));
   CHECK(samaya::verify_qcp_kkt(m, r.col_value, r.row_dual).ok);
 }
+
+namespace {
+
+Model continuous_model(std::vector<double> lower, std::vector<double> upper, std::vector<double> obj) {
+  Model m;
+  m.obj = std::move(obj);
+  m.col_lower = std::move(lower);
+  m.col_upper = std::move(upper);
+  m.col_type.assign(m.obj.size(), samaya::VarType::kContinuous);
+  return m;
+}
+
+}  // namespace
+
+TEST(slp_review_overflow_is_never_certified) {
+  // u = 1e200, v = 2e200 fixed, u^2 - v^2 = 0: infeasible by -3e400, but both squares overflow
+  // and their sum is NaN, which every comparison lets through. Neither the verifier nor the SLP
+  // may accept it.
+  Model m = continuous_model({1e200, 2e200}, {1e200, 2e200}, {0, 0});
+  m.row_lower = {0};
+  m.row_upper = {0};
+  m.A = samaya::SparseMatrix(1, 2);
+  m.row_quadratic = {{0, 0, 0, 1.0}, {0, 1, 1, -1.0}};
+  CHECK(!samaya::verify_primal(m, std::vector<double>{1e200, 2e200}).ok);
+  CHECK(!samaya::verify_qcp_kkt(m, std::vector<double>{1e200, 2e200}, std::vector<double>{0}).ok);
+  const Result r = solve_from(m, {});
+  CHECK(r.status != Status::kFirstOrderStationary);
+  CHECK(!(r.status == Status::kFirstOrderStationary && r.verified));
+}
+
+TEST(slp_review_no_unbounded_verdict_without_a_feasible_point) {
+  // min -z, -1 <= x <= 1, z >= 0, x^2 = -1: no feasible point, though the LPs are unbounded
+  // along z. A ray alone must not be reported as a verified unbounded model.
+  Model m = continuous_model({-1, 0}, {1, kInf}, {0, -1});
+  m.row_lower = {-1};
+  m.row_upper = {-1};
+  m.A = samaya::SparseMatrix(1, 2);
+  m.row_quadratic = {{0, 0, 0, 1.0}};
+  const Result r = solve_from(m, {0, 0});
+  std::printf("  x^2 = -1: %s '%s'\n", samaya::to_string(r.status), r.message.c_str());
+  CHECK(r.status != Status::kUnbounded);
+  CHECK(r.status != Status::kFirstOrderStationary);
+  CHECK(r.status != Status::kInfeasible);  // Not proven either: the loop only failed to restore.
+}
+
+TEST(slp_review_elastics_cannot_make_a_bounded_model_unbounded) {
+  // min -z, x = 1, z >= 0, z - 100 x^2 <= 0: optimum z = 100. At the first penalty the LP is
+  // unbounded through the elastics; the penalty must rise instead of giving up.
+  Model m = continuous_model({1, 0}, {1, kInf}, {0, -1});
+  m.row_lower = {-kInf};
+  m.row_upper = {0};
+  m.A = samaya::SparseMatrix::from_triplets(1, 2, {{0, 1, 1}});
+  m.row_quadratic = {{0, 0, 0, -100.0}};
+  const Result r = solve_from(m, {});
+  std::printf("  z <= 100 x^2: %s, objective %.9g\n", samaya::to_string(r.status), r.objective);
+  CHECK(r.status == Status::kFirstOrderStationary);
+  CHECK(r.verified);
+  CHECK(near(r.objective, -100.0));
+}
+
+TEST(slp_review_a_constant_objective_term_does_not_freeze_the_loop) {
+  // min t - x, t = 1e12 fixed, 0 <= x <= 1, x^2 <= 2: x = 1. A threshold relative to the merit
+  // (about 1e12) treated every step of 0.1 as negligible.
+  Model m = continuous_model({1e12, 0}, {1e12, 1}, {1, -1});
+  m.row_lower = {-kInf};
+  m.row_upper = {2};
+  m.A = samaya::SparseMatrix(1, 2);
+  m.row_quadratic = {{0, 1, 1, 1.0}};
+  const Result r = solve_from(m, {1e12, 0.5});
+  std::printf("  constant term: %s, x = %.9g\n", samaya::to_string(r.status),
+              r.col_value.empty() ? NAN : r.col_value[1]);
+  CHECK(r.status == Status::kFirstOrderStationary);
+  CHECK(r.verified);
+  CHECK(!r.col_value.empty() && near(r.col_value[1], 1.0));
+}
+
+TEST(slp_review_reported_violation_is_the_verifiers) {
+  // A verified answer must report a quadratic-row violation within the verifier's tolerance.
+  const Model m = haverly(100, 13);
+  const Result r = solve_from(m, {});
+  REQUIRE(r.verified);
+  CHECK(r.max_nonlinear_violation <= 1e-6);
+  CHECK(r.max_nonlinear_violation == samaya::verify_primal(m, r.col_value).max_quadratic_row_violation);
+}
