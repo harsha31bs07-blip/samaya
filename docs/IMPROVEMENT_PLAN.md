@@ -172,13 +172,113 @@ parts, each committed and measured on its own:
    - **Numerics:** reject pivots below 1e-3 of the row's largest coefficient, since a small
      pivot amplifies errors in postsolve.
 
-- **Measure:** columns and rows after presolve on all 62 instances against HiGHS (the script
-  from the research, moved into `bench/presolve_compare.py`), then the bound A/B.
-- **Planted bugs:** a wrong sign in the postsolve of x, and a skipped divisibility check. The
-  MILP differential test must report a wrong optimum or a verifier failure.
-- **Risk:** postsolve bugs give wrong answers. The verifier catches them, but only after the
-  solve, so the differential tests must be thorough before any benchmark.
+#### Design (13 October 2026, revised after review)
 
+Presolve now works on a mutable matrix and postsolves from column snapshots (270568e), so
+substitutions can change rows. The first draft of this design was reviewed by Codex (astra,
+high); the review found three cases where it would give wrong answers (approximate
+divisibility, integer bound transfer, dropping small coefficients), and this version fixes them.
+
+**Equivalence is proved, not approximated.** Every reduction must leave a model with the same
+feasible set and optimum, not a relaxation. Where floating-point arithmetic cannot settle a
+case (a ratio that is "nearly" an integer, an integer bound that sits within rounding of an
+integer, a residual coefficient that is "nearly" zero), the reduction is **skipped**, never
+taken with a tolerance. Each skip is counted in `PresolveStats` so the measurements show what
+the caution costs.
+
+**Mode.** MIP mode (`PresolveOptions::mip`: the root, B&B restarts and the sub-MIP heuristics)
+restores x only. C1 and C3 are valid in both modes (their dual postsolve below is a one-line
+rule); C2 starts in MIP mode and gets its dual postsolve as a separate step. The verifier
+re-checks returned solutions, but it cannot see a better solution or a feasible region that a
+wrong reduction removed (root infeasibility, a restart concluding optimal, a sub-MIP finding
+nothing), so the tests compare status and optimum against the reference solvers, not only the
+returned vector.
+
+**Implied-free test (C1, C3).** For column j in row i with coefficient a: the activity bounds of
+the row's *other* columns, kept as finite sums plus counts of infinite contributions (never
+by subtracting j's term from a total that may be infinite), and the row bounds [rl, ru] give
+j's implied range [(rl - U)/a, (ru - L)/a], swapped when a < 0. Any infinite or NaN part, or
+an empty range, means "not implied free". The proof needs the implied range inside
+[l_j, u_j] *shrunk* by an outward error allowance for the sums and the division (relative 1e-12
+of the terms' magnitudes), not "inside up to the feasibility tolerance". It is rechecked right
+before each substitution and never stored, since bounds keep changing. Redundant bounds can
+still be attained; what the proof gives is that they need no multiplier in the restored duals.
+
+**C1. Implied-free column singletons.** `process_singleton_cols` today requires
+l_j = -inf and u_j = +inf. It now also takes a singleton column that is implied free in its
+row. Integer columns stay excluded in MIP mode. The existing kSubstituteCol / kSlackCol
+postsolve is valid as it is: the restored value satisfies the row, so it lies in the implied
+range, and its reduced cost is zero.
+- Tests: random-family differential (presolve on/off, LP and MILP; status, optimum and
+  verification compared) with bounds made redundant on purpose; one and two infinite
+  contributions in the row; a column tightened after the reduction. Assert that the rule fires.
+- Planted bug: the implied range computed without the a < 0 swap.
+
+**C2. Doubleton equations** `a x + b y = c` (row with exactly two active entries, equality).
+Eliminate x: x = (c - b y) / a.
+- **Which one is x:** prefer a continuous column; then the one with fewer other entries; then
+  the larger |coefficient|. Refuse when |a| < kSubstitutionPivotRatio (0.01, the singleton
+  substitution's value) · max(|a|, |b|); count rejects to decide later whether to relax it.
+- **Integer x:** only when y is integer and a, b, c are exactly integral doubles of magnitude
+  at most 2^31 with b and c divisible by a in integer arithmetic (b % a == 0, c % a == 0).
+  Anything else is skipped (or the roles swapped when y is continuous).
+- **Bound transfer:** y's new bounds are its bounds intersected with
+  [(c - a u_x)/b, (c - a l_x)/b] (swapped when a/b < 0). For integer y the transferred
+  endpoints are not rounded with `set_bounds`' integrality tolerance (an allowance in y is
+  multiplied by |b/a| in x). Each candidate integer endpoint Y is tested by computing
+  x(Y) = (c - b Y)/a with a rounding-error bound e = 4 · 2^-52 · (|c| + |b Y|) / |a|: Y is
+  accepted when x(Y) is inside [l_x, u_x] by more than e, rejected (move one integer inward)
+  when it is outside by more than e, and in between the substitution is skipped. Integer endpoints that
+  cross prove infeasibility only when the comparison is unambiguous; otherwise skip.
+- **Rows:** for every other active row r with coefficient a_rx on x: a_ry += -a_rx · b / a and
+  both row bounds shift by -a_rx · c / a. A result that is exactly zero removes the entry; a
+  nonzero residual is kept, and if it is numerically unacceptable (below 1e-9 of the row's
+  largest coefficient) the substitution is rejected, never dropped: dropping can make a feasible
+  model infeasible (εy + z = 1 with ε = 2^-41 and y up to 2^42). Updates are staged, then
+  applied, since the helpers mutate the lists being traversed; all results must be finite
+  before anything is committed.
+- **Objective:** c_y += -c_x · b / a; offset += c_x · c / a.
+- **Record** (saved before any mutation): row, x, y, a, b, c; x's cost and column snapshot;
+  x's and y's bounds before the transfer; y's cost and column snapshot right after the
+  substitution (for the LP dual postsolve). **Primal postsolve:** x = (c - b y) / a.
+- **LP dual postsolve (second step):** with q = c_x - Σ_(r≠e) a_rx λ_r over x's snapshot and
+  d'_y the reduced cost of y right after the substitution: if d'_y has a valid sign at y's
+  bounds before the transfer, λ_e = q / a; otherwise the bound multiplier moves to x:
+  λ_e = q / a + d'_y / b, d_y = 0, d_x = -(a/b) d'_y. Example: min y, x - y = 0,
+  1 <= x <= 3, 0 <= y <= 10: after elimination y = 1 with d'_y = 1, and the correct duals are
+  λ_e = -1, d_x = 1, d_y = 0.
+- **Order:** after the singleton and duplicate-row passes in each round.
+- Tests: the review's counterexamples as fixed cases (near-divisible ratio, the infeasible
+  integer transfer x + 1000y = 999.9995, the ε-cancellation); both signs of a/b; integer pairs
+  divisible and not; a survivor tightened, fixed or eliminated later; aggregation before and
+  after forcing and duplicate rows; random MILPs and LPs with planted doubletons against
+  `reference_milp` / `reference_lp`. For the LP step: survivors at transferred lower and upper
+  bounds, coincident old and new bounds, fixed survivors, maximization.
+- Planted bugs: the postsolve sign of b y; the divisibility check skipped; the multiplier
+  transfer skipped (LP step).
+
+**C3. Implied-free substitution with a fill limit.** Column x implied free in an equality row e;
+row_r -= (a_rx / a_ex) · row_e for each other row r of x, with the same pivot test (against the
+largest entry of e), exact-zero removal, rejection of unacceptable residuals, staged updates,
+bound shifts and objective transfer as C2; x's bounds are dropped (implied). Integer x under the
+same exact-integer divisibility rule for every coefficient of e and its right-hand side, and
+every other column of e integer. Limits, samaya's own choices for a first version (HiGHS limits
+net fill at 10 and treats length-two rows and columns specially; it has no length caps):
+e has at most 10 entries, x at most 10 other entries, net nonzero growth at most 10; each limit
+counts its rejects. Primal postsolve: x = (b_e - Σ a_ek x_k) / a_ex. **Dual postsolve, both
+modes:** λ_e = q / a_ex with q = c_x - Σ_(r≠e) a_rx λ_r over x's snapshot; every other
+reduced cost is unchanged (x's reduced cost is zero, which an implied-free column allows even
+when it lands on a bound).
+
+**Known related risk.** Duplicate-row detection treats rows as parallel within a relative
+1e-12 (`kParallelTol`); y + z = 0 and y + (1 + ε)z = 1 would be merged although they are jointly
+feasible. Aggregation can create such nearly parallel rows. Make the parallel test exact
+(identical normalized coefficients) before C2 lands, and measure what it costs.
+
+**Measure** after each of C1, C2 and C3, before the next:
+- columns and rows after presolve on all 62 instances against HiGHS (the script from the
+  research, moved into `bench/presolve_compare.py`), and the skip counters;
+- then the bound A/B and MIPLIB at 60 s; no wrong answer anywhere.
 ### D. Clique table in propagation and probing (1.5 days)
 
 The conflict graph (`src/mip/cuts.cpp`) now feeds only the clique separator. The research found
