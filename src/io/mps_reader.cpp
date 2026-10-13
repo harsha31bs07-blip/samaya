@@ -1,8 +1,9 @@
 // MPS / QPS reader.
 //
 // Supports the sections NAME, OBJSENSE, OBJNAME, ROWS, COLUMNS (with INTORG/INTEND markers),
-// RHS, RANGES, BOUNDS (UP LO FX FR MI PL BV LI UI), QUADOBJ, QMATRIX, QSECTION (objective only)
-// and ENDATA. Section headers start in column 1; data lines start with whitespace.
+// RHS, RANGES, BOUNDS (UP LO FX FR MI PL BV LI UI), QUADOBJ, QMATRIX, QSECTION (objective only),
+// QCMATRIX (constraint rows), and ENDATA. Section headers start in column 1; data lines start
+// with whitespace.
 //
 // The file is first read as free MPS (whitespace-separated fields). If that fails, it is read
 // again as fixed MPS, where data fields sit in columns 2-3, 5-12, 15-22, 25-36, 40-47 and 50-61
@@ -14,13 +15,17 @@
 //   * Columns default to [0, +inf), including integer columns declared with markers.
 //   * UP with a negative value on a column whose lower bound was not set makes the lower -inf.
 //   * |value| >= 1e30 is treated as infinite.
+//   * QCMATRIX uses CPLEX/Gurobi's full symmetric Q for x'Qx, with no factor 1/2.
+//     MOSEK's different (1/2) convention is not supported.
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <filesystem>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -45,6 +50,7 @@ enum class Section : std::uint8_t {
   kBounds,
   kQuadObj,   // One triangle of Q.
   kQMatrix,   // Full symmetric Q.
+  kQcMatrix,  // Full symmetric Q for a constraint row, without the objective's factor 1/2.
   kEnd,
 };
 
@@ -129,6 +135,14 @@ class MpsParser {
     }
     if (tokens_.empty()) return;
     if (header) {
+      if (fixed_ && tokens_[0] == "QCMATRIX") {
+        // Fixed-format names can contain spaces, including the row named by this header.
+        std::string_view name = line.substr(tokens_[0].size());
+        while (!name.empty() && (name.front() == ' ' || name.front() == '\t')) name.remove_prefix(1);
+        while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.remove_suffix(1);
+        tokens_.resize(1);
+        if (!name.empty()) tokens_.push_back(name);
+      }
       parse_header();
     } else {
       parse_data();
@@ -165,9 +179,22 @@ class MpsParser {
         fail("QSECTION for constraints (quadratic constraints) is not supported");
       }
       section_ = Section::kQMatrix;
+    } else if (key == "QCMATRIX") {
+      if (tokens_.size() != 2) fail("QCMATRIX header needs a row name");
+      const Index row = find_row(tokens_[1]);
+      if (row == -1) {
+        fail("QCMATRIX on objective row '" + std::string(tokens_[1]) +
+             "'; use QUADOBJ/QMATRIX for quadratic objectives");
+      }
+      if (row < 0) fail("QCMATRIX on dropped free row '" + std::string(tokens_[1]) + "'");
+      if (!qc_entries_.emplace(row, QcEntries{}).second) {
+        fail("second QCMATRIX section for row '" + std::string(tokens_[1]) + "'");
+      }
+      qc_row_ = row;
+      section_ = Section::kQcMatrix;
     } else if (key == "ENDATA") {
       section_ = Section::kEnd;
-    } else if (key == "SOS" || key == "QCMATRIX" || key == "INDICATORS" || key == "CSECTION") {
+    } else if (key == "SOS" || key == "INDICATORS" || key == "CSECTION") {
       fail("section " + std::string(key) + " is not supported");
     } else {
       fail("unknown section '" + std::string(key) + "'");
@@ -185,6 +212,7 @@ class MpsParser {
       case Section::kBounds: parse_bound(); break;
       case Section::kQuadObj: parse_quadratic(/*full_matrix=*/false); break;
       case Section::kQMatrix: parse_quadratic(/*full_matrix=*/true); break;
+      case Section::kQcMatrix: parse_row_quadratic(); break;
       case Section::kNone:
       case Section::kEnd: fail("data line outside of a section");
     }
@@ -378,6 +406,48 @@ class MpsParser {
     }
   }
 
+  void parse_row_quadratic() {
+    if (tokens_.size() != 3) fail("QCMATRIX entry needs 3 fields");
+    const Index a = find_col(tokens_[0]);
+    const Index b = find_col(tokens_[1]);
+    const std::string context = "QCMATRIX row '" + model_.row_names[qc_row_] + "', columns '" +
+                                model_.col_names[a] + "' and '" + model_.col_names[b] + "'";
+    std::string_view token = tokens_[2];
+    if (!token.empty() && token.front() == '+') token.remove_prefix(1);
+    double value = 0.0;
+    // Matrix coefficients are finite numbers, not bounds with the MPS infinity sentinel.
+    const auto [ptr, ec] = std::from_chars(token.data(), token.data() + token.size(), value);
+    if (ec != std::errc() || ptr != token.data() + token.size()) {
+      fail("invalid number '" + std::string(tokens_[2]) + "' in " + context);
+    }
+    if (!std::isfinite(value)) fail("non-finite value in " + context);
+    // Retain zeros here so duplicate and mirror checks apply to every listed entry.
+    if (!qc_entries_.at(qc_row_).emplace(std::make_pair(a, b), value).second) {
+      fail("duplicate entry in " + context);
+    }
+  }
+
+  void finish_row_quadratic() {
+    for (const auto& [row, entries] : qc_entries_) {
+      for (const auto& [cols, value] : entries) {
+        const auto [a, b] = cols;
+        double term = value;
+        if (a != b) {
+          const std::string context = "QCMATRIX row '" + model_.row_names[row] + "', columns '" +
+                                      model_.col_names[a] + "' and '" + model_.col_names[b] + "'";
+          const auto mirror = entries.find({b, a});
+          if (mirror == entries.end()) fail("missing mirror in " + context);
+          if (mirror->second != value) fail("unequal mirror in " + context);
+          if (a > b) continue;
+          term = value + mirror->second;  // x'Qx includes both symmetric off-diagonal entries.
+          if (!std::isfinite(term)) fail("non-finite combined value in " + context);
+        }
+        if (term != 0.0) model_.row_quadratic.push_back({row, a, b, term});
+      }
+    }
+    // The ordered maps emit terms sorted by (row, col1, col2), keeping one per pair.
+  }
+
   Model finish() {
     if (objective_name_.empty() && row_kind_.empty() && model_.num_cols() == 0) {
       fail("no ROWS or COLUMNS found");
@@ -419,6 +489,7 @@ class MpsParser {
     if (!q_triplets_.empty()) {
       model_.Q = SparseMatrix::from_triplets(cols, cols, std::move(q_triplets_));
     }
+    finish_row_quadratic();
     line_no_ = 0;
     if (const std::string error = model_.validate(); !error.empty()) fail(error);
     return std::move(model_);
@@ -444,6 +515,9 @@ class MpsParser {
 
   std::vector<Triplet> triplets_;
   std::vector<Triplet> q_triplets_;
+  using QcEntries = std::map<std::pair<Index, Index>, double>;
+  std::map<Index, QcEntries> qc_entries_;
+  Index qc_row_ = -1;
 };
 
 }  // namespace

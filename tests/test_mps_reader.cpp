@@ -1,8 +1,11 @@
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <string>
+#include <vector>
 
 #include "samaya/io.hpp"
+#include "samaya/verify.hpp"
 #include "test_framework.hpp"
 
 using samaya::kInf;
@@ -271,4 +274,228 @@ TEST(mps_errors_report_line_numbers) {
   CHECK_THROWS(read_mps_from_string(
                    "NAME X\nROWS\n N o\nCOLUMNS\n x o 1\nBOUNDS\n LO B x 1e30\nENDATA\n"),
                ParseError);
+}
+
+namespace {
+
+const char* qc_header = R"(NAME QCP
+ROWS
+ N obj
+ L R1
+COLUMNS
+ x1 obj 1 R1 1
+ x2 obj 2
+RHS
+ rhs R1 91
+)";
+
+void check_qcmatrix_error(const std::string& section,
+                         std::initializer_list<const char*> expected) {
+  try {
+    read_mps_from_string(std::string(qc_header) + section + "ENDATA\n");
+    CHECK(false);
+  } catch (const ParseError& e) {
+    const std::string message(e.what());
+    for (const char* word : expected) CHECK(message.find(word) != std::string::npos);
+  }
+}
+
+}  // namespace
+
+TEST(mps_qcmatrix_full_symmetric_activity) {
+  Model m = read_mps_from_string(std::string(qc_header) + R"(QCMATRIX R1
+ x2 x2 5
+ x2 x1 3
+ x1 x2 3
+ x1 x1 2
+ENDATA
+)");
+  REQUIRE(m.row_quadratic.size() == 3);
+  CHECK_EQ(m.row_quadratic[0].row, 0);
+  CHECK_EQ(m.row_quadratic[0].col1, 0);
+  CHECK_EQ(m.row_quadratic[0].col2, 0);
+  CHECK_EQ(m.row_quadratic[0].value, 2.0);
+  CHECK_EQ(m.row_quadratic[1].row, 0);
+  CHECK_EQ(m.row_quadratic[1].col1, 0);
+  CHECK_EQ(m.row_quadratic[1].col2, 1);
+  CHECK_EQ(m.row_quadratic[1].value, 6.0);
+  CHECK_EQ(m.row_quadratic[2].row, 0);
+  CHECK_EQ(m.row_quadratic[2].col1, 1);
+  CHECK_EQ(m.row_quadratic[2].col2, 1);
+  CHECK_EQ(m.row_quadratic[2].value, 5.0);
+  CHECK(m.problem_class() == samaya::ProblemClass::kQCP);
+  CHECK(m.validate().empty());
+  const std::vector<double> x = {2.0, 3.0};
+  // Linear activity 2 plus 2*2^2 + 6*2*3 + 5*3^2 = 89 meets the upper bound 91.
+  CHECK(samaya::verify_primal(m, x).ok);
+  m.row_lower[0] = 91.0;
+  CHECK(samaya::verify_primal(m, x).ok);  // Equality pins down the activity exactly.
+  m.row_lower[0] = -kInf;
+  m.row_upper[0] = 90.0;
+  const auto infeasible = samaya::verify_primal(m, x);
+  CHECK(!infeasible.ok);
+  CHECK(infeasible.max_row_violation > 0.0);
+}
+
+TEST(mps_qcmatrix_row_senses_ranges_and_multiple_sections) {
+  const Model m = read_mps_from_string(R"(NAME SENSES
+ROWS
+ N obj
+ L l
+ G g
+ E e
+COLUMNS
+ x l 1 g 2
+ x e 3
+ y obj 0
+RHS
+ rhs l 10 g 20
+ rhs e 30
+RANGES
+ rng g 4
+QCMATRIX e
+ y y 5
+ x y -3
+ y x -3
+QCMATRIX l
+ x x 2
+QCMATRIX g
+ y x 4
+ x y 4
+ENDATA
+)");
+  CHECK_EQ(m.row_lower[0], -kInf);
+  CHECK_EQ(m.row_upper[0], 10.0);
+  CHECK_EQ(m.row_lower[1], 20.0);
+  CHECK_EQ(m.row_upper[1], 24.0);
+  CHECK_EQ(m.row_lower[2], 30.0);
+  CHECK_EQ(m.row_upper[2], 30.0);
+  REQUIRE(m.row_quadratic.size() == 4);
+  CHECK_EQ(m.row_quadratic[0].row, 0);
+  CHECK_EQ(m.row_quadratic[0].col1, 0);
+  CHECK_EQ(m.row_quadratic[0].col2, 0);
+  CHECK_EQ(m.row_quadratic[0].value, 2.0);  // Diagonal-only section.
+  CHECK_EQ(m.row_quadratic[1].row, 1);
+  CHECK_EQ(m.row_quadratic[1].col1, 0);
+  CHECK_EQ(m.row_quadratic[1].col2, 1);
+  CHECK_EQ(m.row_quadratic[1].value, 8.0);
+  CHECK_EQ(m.row_quadratic[2].row, 2);
+  CHECK_EQ(m.row_quadratic[2].col1, 0);
+  CHECK_EQ(m.row_quadratic[2].col2, 1);
+  CHECK_EQ(m.row_quadratic[2].value, -6.0);
+  CHECK_EQ(m.row_quadratic[3].row, 2);
+  CHECK_EQ(m.row_quadratic[3].col1, 1);
+  CHECK_EQ(m.row_quadratic[3].col2, 1);
+  CHECK_EQ(m.row_quadratic[3].value, 5.0);
+  CHECK(m.validate().empty());
+}
+
+TEST(mps_qcmatrix_zeros_ignored_and_large_finite_coefficient) {
+  const Model zeros = read_mps_from_string(std::string(qc_header) + R"(QCMATRIX R1
+ x1 x1 -0
+ x1 x2 0
+ x2 x1 0
+ x2 x2 +0
+ENDATA
+)");
+  CHECK(zeros.row_quadratic.empty());
+  CHECK(zeros.problem_class() == samaya::ProblemClass::kLP);
+  const Model large = read_mps_from_string(std::string(qc_header) +
+                                         "QCMATRIX R1\n x1 x1 +1e30\nENDATA\n");
+  REQUIRE(large.row_quadratic.size() == 1);
+  CHECK_EQ(large.row_quadratic[0].value, 1e30);
+  CHECK(large.validate().empty());
+}
+
+TEST(mps_qcmatrix_unknown_row) {
+  check_qcmatrix_error("QCMATRIX nosuchrow\n", {"unknown row", "nosuchrow"});
+}
+
+TEST(mps_qcmatrix_objective_row) {
+  check_qcmatrix_error("QCMATRIX obj\n", {"objective row", "obj", "QUADOBJ/QMATRIX"});
+}
+
+TEST(mps_qcmatrix_unknown_column) {
+  check_qcmatrix_error("QCMATRIX R1\n unknown x1 1\n", {"unknown column", "unknown"});
+  check_qcmatrix_error("QCMATRIX R1\n x1 nosuchcol 1\n", {"unknown column", "nosuchcol"});
+}
+
+TEST(mps_qcmatrix_missing_mirror) {
+  check_qcmatrix_error("QCMATRIX R1\n x1 x2 3\n", {"missing mirror", "R1", "x1", "x2"});
+  check_qcmatrix_error("QCMATRIX R1\n x2 x1 3\n", {"missing mirror", "R1", "x1", "x2"});
+}
+
+TEST(mps_qcmatrix_unequal_mirror) {
+  check_qcmatrix_error("QCMATRIX R1\n x1 x2 3\n x2 x1 4\n",
+                       {"unequal mirror", "R1", "x1", "x2"});
+  // Symmetry is exact, with no numerical tolerance even for adjacent floating-point values.
+  check_qcmatrix_error("QCMATRIX R1\n x1 x2 3\n x2 x1 3.0000000000000004\n",
+                       {"unequal mirror", "R1", "x1", "x2"});
+}
+
+TEST(mps_qcmatrix_duplicate_entry) {
+  check_qcmatrix_error("QCMATRIX R1\n x1 x1 2\n x1 x1 2\n",
+                       {"duplicate entry", "R1", "x1"});
+  check_qcmatrix_error("QCMATRIX R1\n x1 x2 3\n x2 x1 3\n x1 x2 4\n",
+                       {"duplicate entry", "R1", "x1", "x2"});
+  check_qcmatrix_error("QCMATRIX R1\n x1 x1 0\n x1 x1 0\n",
+                       {"duplicate entry", "R1", "x1"});
+}
+
+TEST(mps_qcmatrix_second_section_for_row) {
+  check_qcmatrix_error("QCMATRIX R1\n x1 x1 2\nQCMATRIX R1\n",
+                       {"second QCMATRIX section", "R1"});
+  check_qcmatrix_error("QCMATRIX R1\nQCMATRIX R1\n", {"second QCMATRIX section", "R1"});
+}
+
+TEST(mps_qcmatrix_non_finite_value) {
+  for (const char* value : {"inf", "-inf", "+inf", "nan"}) {
+    check_qcmatrix_error(std::string("QCMATRIX R1\n x1 x2 ") + value + "\n",
+                         {"non-finite", "R1", "x1", "x2"});
+  }
+  check_qcmatrix_error("QCMATRIX R1\n x1 x2 1e308\n x2 x1 1e308\n",
+                       {"non-finite combined value", "R1", "x1", "x2"});
+}
+
+TEST(mps_qcmatrix_fixed_format) {
+  const std::string text =
+      "NAME FIXEDQC\nROWS\n" + fixed_line("N", "COST") + fixed_line("L", "ROW ONE") +
+      "COLUMNS\n" + fixed_line("", "X ONE", "COST", "1", "ROW ONE", "1") +
+      fixed_line("", "X TWO", "COST", "2") + "RHS\n" +
+      fixed_line("", "RHS", "ROW ONE", "91") + "QCMATRIX   ROW ONE\n" +
+      fixed_line("", "X ONE", "X ONE", "2") + fixed_line("", "X ONE", "X TWO", "3") +
+      fixed_line("", "X TWO", "X ONE", "3") + fixed_line("", "X TWO", "X TWO", "5") +
+      "ENDATA\n";
+  const Model m = read_mps_from_string(text);
+  REQUIRE(m.row_quadratic.size() == 3);
+  CHECK_EQ(m.row_names[0], "ROW ONE");
+  CHECK_EQ(m.col_names[0], "X ONE");
+  CHECK_EQ(m.col_names[1], "X TWO");
+  CHECK_EQ(m.row_quadratic[0].value, 2.0);
+  CHECK_EQ(m.row_quadratic[1].value, 6.0);
+  CHECK_EQ(m.row_quadratic[2].value, 5.0);
+  CHECK(samaya::verify_primal(m, std::vector<double>{2.0, 3.0}).ok);
+  CHECK(m.validate().empty());
+}
+
+TEST(mps_quadobj_and_qcmatrix_together) {
+  const Model m = read_mps_from_string(std::string(qc_header) + R"(QUADOBJ
+ x1 x1 2
+ x1 x2 1
+ x2 x2 4
+QCMATRIX R1
+ x1 x1 2
+ x1 x2 3
+ x2 x1 3
+ x2 x2 5
+ENDATA
+)");
+  CHECK_EQ(m.Q.nnz(), 3);
+  CHECK_EQ(m.Q.values()[0], 2.0);
+  CHECK_EQ(m.Q.values()[1], 1.0);
+  CHECK_EQ(m.Q.values()[2], 4.0);
+  REQUIRE(m.row_quadratic.size() == 3);
+  CHECK_EQ(m.row_quadratic[1].value, 6.0);
+  CHECK(m.problem_class() == samaya::ProblemClass::kQCP);
+  CHECK(m.validate().empty());
 }
