@@ -148,7 +148,9 @@ std::vector<Index> minimum_degree_order(const SparseMatrix& pattern,
     const Index lp_size = static_cast<Index>(lp.size());
     for (const Index i : lp) {
       const auto ui = static_cast<std::size_t>(i);
-      Index external = 0;  // Sum of |Le \ Lp| over i's other elements.
+      // Sum of |Le \ Lp| over i's other elements. 64-bit: the elements overlap, so the sum can
+      // pass INT32_MAX (e.g. 46,341 elements of weight 46,341) while the degree it bounds cannot.
+      long long external = 0;
       auto& el = elems[ui];
       std::size_t keep = 0;
       for (const Index e : el) {
@@ -194,8 +196,12 @@ std::vector<Index> minimum_degree_order(const SparseMatrix& pattern,
       } else {
         // AMD's bound: no more than the variables left, than the old degree plus the new
         // element, or than i's own neighbours plus the new element plus the other elements
-        // outside it.
-        d = std::min({remaining - 1, degree[ui] + lp_size - 1, own + lp_size - 1 + external});
+        // outside it. Summed in 64 bits; the minimum is at most remaining - 1, so it fits.
+        const long long bound =
+            std::min({static_cast<long long>(remaining) - 1,
+                      static_cast<long long>(degree[ui]) + lp_size - 1,
+                      static_cast<long long>(own) + lp_size - 1 + external});
+        d = static_cast<Index>(bound);
       }
       queue.erase({degree[ui], i});
       degree[ui] = std::max<Index>(d, 0);

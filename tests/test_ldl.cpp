@@ -273,4 +273,30 @@ TEST(minimum_degree_approximate_degrees_keep_the_fill) {
   std::printf("  grid and random patterns: fill %lld (approximate) vs %lld (exact)\n",
               total_approximate, total_exact);
   CHECK(static_cast<double>(total_approximate) <= 1.1 * static_cast<double>(total_exact));
+
+  // Mixed: small thresholds switch between exact and approximate degrees within one ordering,
+  // the case the default threshold produces on large models. Each pattern on its own must get a
+  // permutation and keep near the exact fill, so a gain on one cannot hide a loss on another.
+  constexpr double kMixedFillRatio = 1.05;
+  for (const std::size_t threshold : {std::size_t{16}, std::size_t{64}, std::size_t{256}}) {
+    for (std::size_t k = 0; k < patterns.size(); ++k) {
+      const SparseMatrix& pattern = patterns[k];
+      const auto mixed = samaya::minimum_degree_order(pattern, threshold);
+      std::vector<Index> order = mixed;
+      std::sort(order.begin(), order.end());
+      std::vector<Index> identity(static_cast<std::size_t>(pattern.rows()));
+      std::iota(identity.begin(), identity.end(), Index{0});
+      CHECK(order == identity);
+      const samaya::NnzIndex fill_mixed = fill(pattern, mixed);
+      const samaya::NnzIndex fill_exact_k =
+          fill(pattern, samaya::minimum_degree_order(pattern, static_cast<std::size_t>(-1)));
+      if (static_cast<double>(fill_mixed) > kMixedFillRatio * static_cast<double>(fill_exact_k)) {
+        std::printf("  pattern %zu, threshold %zu: fill %lld (mixed) vs %lld (exact)\n", k,
+                    threshold, static_cast<long long>(fill_mixed),
+                    static_cast<long long>(fill_exact_k));
+      }
+      CHECK(static_cast<double>(fill_mixed) <=
+            kMixedFillRatio * static_cast<double>(fill_exact_k));
+    }
+  }
 }
