@@ -11,6 +11,7 @@ add_executable(samaya_tests
   test_pdlp.cpp
   test_presolve.cpp
   test_qp.cpp
+  test_ranging.cpp
   test_scaling.cpp
   test_sparse_matrix.cpp
   test_verify.cpp

@@ -10,6 +10,7 @@
 #include "lp/ipm.hpp"
 #include "lp/lp_solver.hpp"
 #include "lp/pdlp.hpp"
+#include "lp/ranging.hpp"
 #include "mip/branch_and_bound.hpp"
 #include "presolve/presolve.hpp"
 #include "qp/miqp.hpp"
@@ -666,6 +667,16 @@ Result Solver::solve(const Model& model) const {
     case ProblemClass::kMIQP:
       solve_miqp_model(model, params_, log, result);
       break;
+  }
+
+  if (params_.ranging) {
+    if (model.problem_class() != ProblemClass::kLP) {
+      result.ranging.message = "ranging is available for LPs only";
+    } else if (result.status == Status::kOptimal) {
+      Params ranging_params = params_;
+      ranging_params.time_limit -= timer.seconds();  // Ranging shares the solve's time budget.
+      result.ranging = compute_ranging(model, result, ranging_params, log);
+    }
   }
 
   result.solve_seconds = timer.seconds();

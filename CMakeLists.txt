@@ -92,6 +92,7 @@ add_library(samaya
   src/lp/ipm.cpp
   src/lp/lp_solver.cpp
   src/lp/pdlp.cpp
+  src/lp/ranging.cpp
   src/lp/simplex.cpp
   src/gpu/info.cpp
   src/mip/branch_and_bound.cpp

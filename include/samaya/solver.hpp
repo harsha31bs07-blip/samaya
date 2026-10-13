@@ -11,6 +11,30 @@
 
 namespace samaya {
 
+// Sensitivity ranging of an optimal LP (Params::ranging), in the original model's units and
+// objective sense. Each range is for the basis the ranging was computed from: inside it that
+// basis stays optimal when only that one number changes. When ranging is available, the
+// Result's solution, duals and reduced costs are that basis's (verified, same objective), which
+// can be another optimum than the one found without ranging when the LP has several.
+struct Ranging {
+  bool available = false;
+  std::string message;  // Why it is not available, or a note about the basis used.
+
+  // Objective coefficient of each column (n): the current solution stays optimal for any
+  // coefficient in [cost_lower[j], cost_upper[j]]. -kInf / +kInf for unbounded sides.
+  std::vector<double> cost_lower;
+  std::vector<double> cost_upper;
+
+  // The activity level of each column (n) and row (m) whose bound is binding (nonbasic in the
+  // basis): if that bound is moved to any value in [lower, upper], the basis stays optimal and
+  // the objective changes at the rate of the column's reduced cost (col_dual) or the row's dual
+  // (row_dual). NaN for basic columns and rows (their bounds are not binding).
+  std::vector<double> col_level_lower;
+  std::vector<double> col_level_upper;
+  std::vector<double> row_level_lower;
+  std::vector<double> row_level_upper;
+};
+
 struct Result {
   Status status = Status::kNotSolved;
   std::string message;
@@ -23,6 +47,7 @@ struct Result {
   std::vector<double> row_activity;  // A x
   std::vector<double> row_dual;      // y with c - A'y = reduced costs (LP/QP only)
   std::vector<double> col_dual;      // reduced costs (LP/QP only)
+  Ranging ranging;
 
   // Certificates: a Farkas multiplier per row when infeasible, an improving direction when
   // unbounded.

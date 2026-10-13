@@ -38,6 +38,7 @@ struct Params {
   // simplex, and report that. Off: the interior point is reported when it verifies. A point that
   // fails verification goes to the simplex from the crossover basis either way.
   bool crossover = false;
+  bool ranging = false;  // Compute cost and binding-bound sensitivity ranges for optimal LPs.
   // Simplex iterations the crossover may take before the dual simplex starts over from the slack
   // basis: a guess that needs more was poor (dfl001 from a 1e-4 PDLP point: 289,256 iterations
   // and a numerical error, where a fresh start needs about 23,000). -1: automatic,
