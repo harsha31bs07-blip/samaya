@@ -7,8 +7,7 @@ official finale date is out yet: when it is, shift the calendar in section 6 and
 This plan does not replace `docs/POST_SUBMISSION_PLAN.md` (W0–W8, with their methods, tests and
 gates). It updates that plan's status after 7–9 October, reorders the work by what decides a
 finale, and adds:
-- a split of the work between Claude and Codex that uses both agents' 5-hour windows and weekly
-  limits steadily, without running either one out (sections 4 and 5);
+- how the work is split between Claude and Codex, both working in parallel (sections 4 and 5);
 - preparation for the sprint itself: the judges' rounds, a likely on-site change request, and a
   rehearsal.
 
@@ -168,71 +167,39 @@ by 16 November.
 7. **One full rehearsal** of the 36-hour format in the last week of November: 12 hours of work
    with three mock judging rounds.
 
-## 4. Capacity: Claude's and Codex's limits
+## 4. How Claude and Codex share the work
 
-Both agents have a rolling 5-hour usage window and a weekly limit. The plan spends both at a
-steady rate, so neither sits idle while the other runs out.
+Codex is used like a second engineer, not on a quota: any piece of work goes to whichever agent
+suits it, decided task by task, and both work at the same time wherever the files allow.
 
-### Split of the work
+### Who takes what
 
-Claude writes what is risky, cross-cutting or needs judgement; Codex writes what can be fully
-specified with bounded files and a test that decides it.
-
-| Claude | Codex |
+| Usually Claude | Usually Codex |
 |---|---|
-| Specs for every Codex task (method, files, tests, planted bug, how to verify) | Well-specified numerics from a spec: ranging, clique table, zero-half or c-MIR, shifting heuristics, `.mps.gz` inflate |
-| Risky numerics: presolve aggregator and postsolve, SLP loop, simplex speed, symmetry | Plumbing and UI: JSON, Studio, Excel, CLI flags, installer |
-| Review of every Codex diff; integration; Linux, asan and cuda presets; commits | Python plugins, case generators, Haverly and blending instances, demo scripts |
-| Benchmark set-up and `docs/results/` | Unit tests where coverage is thin; housekeeping |
-| Slides, demo, internals sheets (final versions) | Reviews of Claude's branches; design second opinions; first drafts of internals sheets |
+| Decisions and specs: method, contract, files, tests, planted bugs, how to verify | Implementation from a spec, including numerics: ranging, clique table, cuts, heuristics, `.mps.gz` inflate |
+| Work where a subtle mistake gives wrong answers: presolve aggregator and postsolve, SLP loop, simplex internals | Plumbing and UI: CLI, JSON, Studio, Excel, installer |
+| Integration: review of every Codex diff, the Linux debug, release, asan and cuda presets, commits | Python plugins, case generators, test instances, demo scripts, tests where coverage is thin |
+| Benchmarks and `docs/results/`; slides, demo, internals sheets (final versions) | Reviews of Claude's branches, design second opinions (astra for the hard ones), research in large files, first drafts |
 
-Over the eight weeks this puts about half of the code-writing on each side, with Claude's
-time going more to specs, review and integration.
+Tier and effort follow `C:\dev\CLAUDE.md`: luna for mechanical work, sol for most
+implementation and reviews, astra for the hardest problems and high-stakes reviews.
 
-### Daily rhythm (Monday to Saturday)
+### Working rules
 
-| Block | Claude | Codex | Machine |
-|---|---|---|---|
-| **Window 1** (about 09:00–14:00) | Its own work package for the week | One write run in a worktree (`-Worktree`) on files Claude is not touching, from a spec written the evening before | Free for builds |
-| **Window 2** (about 16:00–21:00) | Review and integrate Codex's diff; presets; write tomorrow's spec | One review of Claude's branch, or a second small task (luna or sol/medium) | Free for builds |
-| **Night** | – | – | Benchmarks, alone on the machine |
-| **Sunday** | Off | Off | Long runs if needed |
-
-- Start each window with real work, so the 5-hour clock is not burned on idle time; two
-  windows a day fit with a break between them.
-- **Codex builds with the Windows presets** in its worktree and runs the debug tests there;
-  Claude runs the Linux debug, release, asan and cuda presets in WSL at integration. This
-  keeps Codex's runs short and the full checks in one place.
-- **No agent runs while a benchmark runs** (the clock rule).
-
-### Weekly targets
-
-| | Claude | Codex |
-|---|---|---|
-| Sessions or runs | about 10 windows (2 a day, 5 days), plus a light Saturday | 8–11 runs: 5–6 sol/medium or sol/high writes, 1–2 luna, 2 reviews |
-| astra | – | at most 1 a week, 5 in total |
-| Aim | about 70% of the weekly limit | about 70% of the weekly limit |
-| Reserve | 30% for fixes, failed runs and surprises | 30%, and luna for small fixes |
-
-Check the usage pages of both at the start of the week and on Wednesday:
-- **Claude above 60% by Wednesday:** the next spec'd item that was Claude's goes to Codex
-  sol/high, and Claude keeps to specs and review for the rest of the week.
-- **Codex above 60% by Wednesday:** drop a tier (astra → sol/high, sol/high → sol/medium), or
-  Claude takes the item, and the rest of the week's Codex runs are reviews only.
-- **Either limit hit:** the work queues; nothing waits on the other agent. The calendar has a
-  half-day of slack in every week for this.
-
-### Habits that save both limits
-
-- **Claude:** run benchmarks and long builds in the background and read the summaries, never
-  the logs; ask Codex (sol/low, read-only) "where and how does X work" in large files instead of
-  reading them whole; write each spec once, as a task file, so a retry costs nothing to write.
-- **Codex:** medium effort by default; specs complete enough that no run is wasted; one review
-  per finished branch, not per commit; no `xhigh`, `max` or `ultra` unless the owner asks.
-- **Specs** live in `C:\dev\.agents\specs\` and say: the goal, the files in scope, the rules of
-  `CLAUDE.md`, the acceptance criteria and how to verify. Codex never commits or pushes.
-- **Finale week:** no Codex runs in the three days before the finale and light Claude use, so
-  both limits are fresh for the sprint.
+- **In parallel:** Codex writes in its own worktree (`-Worktree`) on files Claude is not
+  touching (section 5), so both can work at once; several Codex tasks can run side by side on
+  disjoint files.
+- **Specs** live in `C:\dev\.agents\specs\` and are self-contained: the goal, the files in
+  scope, the rules of `CLAUDE.md`, the acceptance criteria, how to verify, and the build recipe
+  for Codex's sandbox (`samaya-build-recipe.md`: NMake, Release, Studio off). Codex never
+  commits or pushes.
+- **When Codex finds a problem in a spec,** it stops and reports; Claude fixes the contract
+  rather than letting a test be weakened (as with ranging's dual degeneracy on 13 October).
+- **Every Codex result** is reviewed and integrated by Claude, with the four Linux presets and
+  the planted bugs, before it is committed.
+- **The clock rule:** no builds or agent runs on the laptop while a timed benchmark runs.
+- **Limits:** if either agent's 5-hour or weekly limit runs out, the other carries on; nothing
+  waits on one agent.
 
 ## 5. Who owns which files each week
 
@@ -254,18 +221,18 @@ The exact paths are checked against `docs/ARCHITECTURE.md` §6 when each spec is
 
 ## 6. Calendar (IST; shift with the official finale date)
 
-| Week | Dates | Claude | Codex (runs) | Machine (nights) |
+| Week | Dates | Claude | Codex | Machine (nights) |
 |---|---|---|---|---|
-| 1 | 13–19 Oct | P0 setup, merge `claude/pdlp-logs`; ranging spec; Python plugin spec | `pdlp-logs` review (sol/high); W0 (luna/low); ranging (sol/high); PuLP/Pyomo plugins (sol/medium); tests where thin (luna/medium). **~8** | 467k LP, PDLP + crossover; Mittelmann subset |
-| 2 | 20–26 Oct | `large_lp.md`; presolve aggregator design and code | aggregator design opinion (astra/high); ranging export + column bounds to CLI/JSON/Studio/Excel (sol/medium, 2 runs); review of ranging integration (sol/high). **~8** | barrier and dual simplex on the large LP if needed; SCIP separators |
-| 3 | 27 Oct – 2 Nov | aggregator finished, A/B; clique table spec | clique table (sol/high, 2 runs); aggregator review (astra/high); case generator scale-up (sol/medium); luna fixes. **~9** | MIPLIB 60/600 s after C |
-| 4 | 3–9 Nov | clique A/B and merge; SLP design, then the loop | SLP design opinion (astra/high); Haverly + blending + QP blending cases (sol/medium, 2 runs); Studio tank lines (sol/medium); inference history (sol/medium). **~10** | MIPLIB after D |
-| 5 | 10–16 Nov | SLP finished; cut spec from the separator results | zero-half or c-MIR (sol/high, 2 runs); SLP review (sol/high); tests where thin (luna). **~8** | cases re-run; Maros–Mészáros |
-| 6 | 17–23 Nov | W4 profile and hyper-sparse solves; G if allowed | `.mps.gz` (sol/high); installer (sol/medium); shifting/zi-round if allowed (sol/high); simplex review (sol/high). **~9** | W6 parallel table |
-| 7 | 24–30 Nov | final results; v0.2.0; deck, video; rehearsal | release review (astra/high); `demo.sh` (luna/medium); internals drafts (sol/medium, read-only); luna fixes. **~7** | final runs: Netlib, cases, MIPLIB, QP, Mittelmann, large LP |
-| 8+ | from 1 Dec | freeze; internals sheets, mock Q&A, demo drills | fixes only (luna/sol); none in the last 3 days. **~3** | – |
+| 1 | 13–19 Oct | P0 setup, merge `claude/pdlp-logs`; ranging spec; Python plugin spec | `pdlp-logs` review (sol/high); W0 (luna/low); ranging (sol/high); PuLP/Pyomo plugins (sol/medium); tests where thin (luna/medium). | 467k LP, PDLP + crossover; Mittelmann subset |
+| 2 | 20–26 Oct | `large_lp.md`; presolve aggregator design and code | aggregator design opinion (astra/high); ranging export + column bounds to CLI/JSON/Studio/Excel (sol/medium); review of ranging integration (sol/high). | barrier and dual simplex on the large LP if needed; SCIP separators |
+| 3 | 27 Oct – 2 Nov | aggregator finished, A/B; clique table spec | clique table (sol/high); aggregator review (astra/high); case generator scale-up (sol/medium); luna fixes. | MIPLIB 60/600 s after C |
+| 4 | 3–9 Nov | clique A/B and merge; SLP design, then the loop | SLP design opinion (astra/high); Haverly + blending + QP blending cases (sol/medium); Studio tank lines (sol/medium); inference history (sol/medium). | MIPLIB after D |
+| 5 | 10–16 Nov | SLP finished; cut spec from the separator results | zero-half or c-MIR (sol/high); SLP review (sol/high); tests where thin (luna). | cases re-run; Maros–Mészáros |
+| 6 | 17–23 Nov | W4 profile and hyper-sparse solves; G if allowed | `.mps.gz` (sol/high); installer (sol/medium); shifting/zi-round if allowed (sol/high); simplex review (sol/high). | W6 parallel table |
+| 7 | 24–30 Nov | final results; v0.2.0; deck, video; rehearsal | release review (astra/high); `demo.sh` (luna/medium); internals drafts (sol/medium, read-only); luna fixes. | final runs: Netlib, cases, MIPLIB, QP, Mittelmann, large LP |
+| 8+ | from 1 Dec | freeze; internals sheets, mock Q&A, demo drills | fixes only (luna/sol). | – |
 
-In total about 70 Codex runs, astra 5 times, and about 10 Claude windows a week.
+The Codex column is a starting split; items move between the columns whenever that is faster.
 
 **Critical path:** P1 (the scale run) and P2.1–P2.3 (ranging, Python, SLP). MILP work (P3) is
 the largest single improvement but is not needed for a demo; it moves if P1 or P2 runs late.
@@ -285,5 +252,3 @@ P2 and P3 are still the useful core for the solver.
    `-rens2`): keep or drop.
 5. **Whether SLP comes before the MILP items C and D** if both cannot fit by mid-November. This
    plan puts the refinery fit first because it is what MRPL's judges will ask about.
-6. **The working hours** in section 4 are a suggestion: move the two windows to fit the team's
-   day, keeping a gap between them and the nights free for benchmarks.
