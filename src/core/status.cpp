@@ -16,6 +16,7 @@ const char* to_string(Status status) {
     case Status::kInvalidModel: return "invalid_model";
     case Status::kNotImplemented: return "not_implemented";
     case Status::kNotConvex: return "not_convex";
+    case Status::kFirstOrderStationary: return "first_order_stationary";
   }
   return "unknown";
 }

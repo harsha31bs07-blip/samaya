@@ -32,6 +32,18 @@ double bound_violation(double v, double lo, double up, double scale) {
   return violation;
 }
 
+// Adds the quadratic row terms value * x_col1 * x_col2 to the row activities, in extended
+// precision, and their sizes to the rows' magnitudes (as the linear terms do).
+void add_quadratic_rows(const Model& model, std::span<const double> x,
+                        std::vector<Real>& activity, std::vector<double>& magnitude) {
+  for (const RowQuadraticTerm& t : model.row_quadratic) {
+    const Real term = static_cast<Real>(t.value) * x[t.col1] * x[t.col2];
+    const auto i = static_cast<std::size_t>(t.row);
+    activity[i] += term;
+    magnitude[i] = std::max(magnitude[i], static_cast<double>(fabs(term)));
+  }
+}
+
 }  // namespace
 
 VerifyReport verify_primal(const Model& model, std::span<const double> x,
@@ -73,6 +85,7 @@ VerifyReport verify_primal(const Model& model, std::span<const double> x,
       magnitude[index[p]] = std::max(magnitude[index[p]], static_cast<double>(fabs(term)));
     }
   }
+  add_quadratic_rows(model, x, activity, magnitude);
   for (Index i = 0; i < m; ++i) {
     const double v = bound_violation(static_cast<double>(activity[i]), model.row_lower[i],
                                      model.row_upper[i], magnitude[i]);
@@ -144,9 +157,31 @@ VerifyReport verify_kkt(const Model& model, std::span<const double> x, std::span
       }
     }
   }
+  // Quadratic rows: their Jacobian, recomputed here from the model and x, enters d as
+  // -Σ_i y_i dh_i/dx_j, where d(v x_a x_b)/dx_a = v x_b (and 2 v x_a when a = b).
+  std::vector<Real> jty(static_cast<std::size_t>(n), Real());
+  std::vector<double> jty_scale(static_cast<std::size_t>(n), 0.0);
+  if (y.size() == static_cast<std::size_t>(m)) {
+    for (const RowQuadraticTerm& t : model.row_quadratic) {
+      const auto a = static_cast<std::size_t>(t.col1);
+      const auto b = static_cast<std::size_t>(t.col2);
+      if (a == b) {
+        const Real g = static_cast<Real>(2.0 * t.value) * x[a] * y[t.row];
+        jty[a] += g;
+        jty_scale[a] += static_cast<double>(fabs(g));
+      } else {
+        const Real ga = static_cast<Real>(t.value) * x[b] * y[t.row];
+        const Real gb = static_cast<Real>(t.value) * x[a] * y[t.row];
+        jty[a] += ga;
+        jty[b] += gb;
+        jty_scale[a] += static_cast<double>(fabs(ga));
+        jty_scale[b] += static_cast<double>(fabs(gb));
+      }
+    }
+  }
   for (Index j = 0; j < n; ++j) {
-    Real d = model.obj[j] + qx[j];
-    double scale = std::fabs(model.obj[j]) + q_scale[j];
+    Real d = model.obj[j] + qx[j] - jty[j];
+    double scale = std::fabs(model.obj[j]) + q_scale[j] + jty_scale[j];
     for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
       const Real term = static_cast<Real>(value[p]) * y[index[p]];
       d -= term;
@@ -165,6 +200,7 @@ VerifyReport verify_kkt(const Model& model, std::span<const double> x, std::span
     report.max_dual_violation = std::max(report.max_dual_violation, violation);
     fail(report, violation, tol.dual, "reduced cost of column", j);
   }
+  add_quadratic_rows(model, x, activity, magnitude);
   for (Index i = 0; i < m; ++i) {
     if (!std::isfinite(y[i])) {
       report.ok = false;
@@ -195,6 +231,14 @@ VerifyReport verify_lp_optimality(const Model& model, std::span<const double> x,
 
 VerifyReport verify_qp_optimality(const Model& model, std::span<const double> x,
                                   std::span<const double> y, const VerifyTolerances& tol) {
+  return verify_kkt(model, x, y, tol, true);
+}
+
+VerifyReport verify_qcp_kkt(const Model& model, std::span<const double> x,
+                            std::span<const double> y, const VerifyTolerances& tol) {
+  // The same conditions, with the quadratic rows' Jacobian at x in the reduced costs and their
+  // terms in the activities (verify_kkt always includes them). This is first-order
+  // stationarity only: it does not certify a local optimum (docs/SLP_PLAN.md section 1).
   return verify_kkt(model, x, y, tol, true);
 }
 

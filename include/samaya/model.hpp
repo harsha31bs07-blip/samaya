@@ -13,19 +13,32 @@ enum class ObjSense : std::int8_t { kMinimize = 1, kMaximize = -1 };
 
 enum class VarType : std::uint8_t { kContinuous, kInteger };
 
-enum class ProblemClass : std::uint8_t { kLP, kQP, kMILP, kMIQP };
+// kQCP: quadratic terms in constraint rows (docs/SLP_PLAN.md), solved to a first-order
+// stationary point by SLP.
+enum class ProblemClass : std::uint8_t { kLP, kQP, kMILP, kMIQP, kQCP };
 
 const char* to_string(ProblemClass problem_class);
+
+// A quadratic term value * x_col1 * x_col2 in the activity of `row`, with col1 <= col2 and one
+// term per (row, col1, col2). x'Qx in a row (the CPLEX/Gurobi QCMATRIX convention) gives
+// value = Q_ii on the diagonal and Q_ij + Q_ji off it.
+struct RowQuadraticTerm {
+  Index row = 0;
+  Index col1 = 0;
+  Index col2 = 0;
+  double value = 0.0;
+};
 
 // An optimization model in the form
 //
 //   min / max   c'x + 1/2 x'Qx + obj_offset
-//   subject to  row_lower <= A x <= row_upper
+//   subject to  row_lower <= A x + q(x) <= row_upper
 //               col_lower <=  x  <= col_upper
 //               x_j integer for col_type[j] == kInteger
 //
 // Infinite bounds are represented by +/- kInf. Q is stored as its lower triangle (row >= col)
-// and is empty for linear objectives.
+// and is empty for linear objectives. q(x) holds the row_quadratic terms (bilinear blend
+// qualities, for instance) and is empty for linear rows.
 struct Model {
   std::string name;
   ObjSense sense = ObjSense::kMinimize;
@@ -43,12 +56,14 @@ struct Model {
 
   SparseMatrix A;
   SparseMatrix Q;
+  std::vector<RowQuadraticTerm> row_quadratic;
 
   Index num_rows() const { return static_cast<Index>(row_lower.size()); }
   Index num_cols() const { return static_cast<Index>(col_lower.size()); }
   Index num_integers() const;
   bool is_mip() const { return num_integers() > 0; }
   bool is_qp() const { return !Q.empty(); }
+  bool has_quadratic_rows() const { return !row_quadratic.empty(); }
   ProblemClass problem_class() const;
 
   // Returns an empty string when the model is consistent, otherwise a description of the first

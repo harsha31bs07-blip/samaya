@@ -114,3 +114,89 @@ TEST(verify_unbounded_ray) {
   m.sense = samaya::ObjSense::kMaximize;
   CHECK(!samaya::verify_unbounded_ray(m, std::vector<double>{1, 1}).ok);  // Not improving.
 }
+
+namespace {
+
+Model continuous(int n) {
+  Model m;
+  m.col_lower.assign(static_cast<std::size_t>(n), 0.0);
+  m.col_upper.assign(static_cast<std::size_t>(n), 10.0);
+  m.col_type.assign(static_cast<std::size_t>(n), samaya::VarType::kContinuous);
+  return m;
+}
+
+// min -x - y  s.t.  x y <= 4 (a bilinear row with no linear part), 0 <= x, y <= 10.
+// KKT point (2, 2): the gradient (-1, -1) equals lambda (y, x) = lambda (2, 2) with
+// lambda = -1/2, nonpositive as a row at its upper bound requires.
+Model bilinear_cap() {
+  Model m = continuous(2);
+  m.obj = {-1, -1};
+  m.row_lower = {-kInf};
+  m.row_upper = {4};
+  m.A = samaya::SparseMatrix(1, 2);
+  m.row_quadratic = {{0, 0, 1, 1.0}};
+  return m;
+}
+
+}  // namespace
+
+TEST(verify_primal_includes_quadratic_rows) {
+  Model m = continuous(2);
+  m.obj = {0, 0};
+  // 2u^2 + 6uv + 5v^2 + u (QCMATRIX diagonal 2 and 5, symmetric off-diagonal 3) <= 91.
+  m.row_lower = {-kInf};
+  m.row_upper = {91};
+  m.A = samaya::SparseMatrix::from_triplets(1, 2, {{0, 0, 1}});
+  m.row_quadratic = {{0, 0, 0, 2.0}, {0, 0, 1, 6.0}, {0, 1, 1, 5.0}};
+  CHECK(m.validate().empty());
+  CHECK(m.problem_class() == samaya::ProblemClass::kQCP);
+  CHECK(samaya::verify_primal(m, std::vector<double>{2, 3}).ok);   // 89 + 2 = 91.
+  m.row_upper = {90};
+  const VerifyReport r = samaya::verify_primal(m, std::vector<double>{2, 3});
+  CHECK(!r.ok);  // Violated only through the quadratic terms.
+  CHECK(r.max_row_violation > 0.0);
+}
+
+TEST(verify_qcp_kkt_accepts_the_multipliers_of_a_kkt_point_only) {
+  const Model m = bilinear_cap();
+  const std::vector<double> x{2, 2};
+  CHECK(samaya::verify_qcp_kkt(m, x, std::vector<double>{-0.5}).ok);
+  CHECK(!samaya::verify_qcp_kkt(m, x, std::vector<double>{-0.4}).ok);  // Wrong multiplier.
+  CHECK(!samaya::verify_qcp_kkt(m, x, std::vector<double>{0.5}).ok);   // Wrong sign.
+  // Feasible but not stationary: at (1, 3) the row is not active, so no multiplier can help.
+  CHECK(!samaya::verify_qcp_kkt(m, std::vector<double>{1, 3}, std::vector<double>{-0.5}).ok);
+  CHECK(!samaya::verify_qcp_kkt(m, std::vector<double>{1, 3}, std::vector<double>{0.0}).ok);
+  // A Jacobian read as linear (dh/dx = 1) would accept lambda = -1; the right one does not.
+  CHECK(!samaya::verify_qcp_kkt(m, x, std::vector<double>{-1.0}).ok);
+}
+
+TEST(verify_qcp_kkt_diagonal_term_and_maximization) {
+  // max x  s.t.  x^2 <= 4: KKT at x = 2 with y = 1/4 (d = 1 - 2x y = 0; for a maximization a
+  // row at its upper bound needs y >= 0). A diagonal term's derivative is 2 v x.
+  Model m = continuous(1);
+  m.sense = samaya::ObjSense::kMaximize;
+  m.obj = {1};
+  m.row_lower = {-kInf};
+  m.row_upper = {4};
+  m.A = samaya::SparseMatrix(1, 1);
+  m.row_quadratic = {{0, 0, 0, 1.0}};
+  CHECK(samaya::verify_qcp_kkt(m, std::vector<double>{2}, std::vector<double>{0.25}).ok);
+  CHECK(!samaya::verify_qcp_kkt(m, std::vector<double>{2}, std::vector<double>{0.5}).ok);
+}
+
+TEST(verify_qcp_kkt_certifies_stationarity_not_local_optimality) {
+  // min z  s.t.  z - u v = 0,  -1 <= u, v <= 1: the origin is a KKT point (lambda = 1), yet
+  // (t, -t, -t^2) is feasible and better arbitrarily close to it. The check must accept it:
+  // it certifies first-order stationarity only, which is all the SLP status claims.
+  Model m;
+  m.obj = {0, 0, 1};
+  m.col_lower = {-1, -1, -kInf};
+  m.col_upper = {1, 1, kInf};
+  m.col_type.assign(3, samaya::VarType::kContinuous);
+  m.row_lower = {0};
+  m.row_upper = {0};
+  m.A = samaya::SparseMatrix::from_triplets(1, 3, {{0, 2, 1}});
+  m.row_quadratic = {{0, 0, 1, -1.0}};
+  CHECK(samaya::verify_qcp_kkt(m, std::vector<double>{0, 0, 0}, std::vector<double>{1}).ok);
+  CHECK(samaya::verify_primal(m, std::vector<double>{0.1, -0.1, -0.01}).ok);
+}

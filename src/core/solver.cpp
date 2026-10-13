@@ -667,6 +667,14 @@ Result Solver::solve(const Model& model) const {
     case ProblemClass::kMIQP:
       solve_miqp_model(model, params_, log, result);
       break;
+    case ProblemClass::kQCP:
+      // Quadratic rows (docs/SLP_PLAN.md). Refused, never passed to code that would ignore
+      // them: with integers or a quadratic objective for good, and until the SLP lands for now.
+      result.status = Status::kNotImplemented;
+      result.message = model.is_mip()   ? "quadratic rows with integer columns are not supported"
+                       : model.is_qp() ? "quadratic rows with a quadratic objective are not supported"
+                                       : "quadratic rows (SLP) are not available yet";
+      break;
   }
 
   if (params_.ranging) {

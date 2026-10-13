@@ -178,3 +178,29 @@ TEST(solver_solves_and_verifies_lp_outcomes) {
   CHECK(r.status == samaya::Status::kOptimal);
   CHECK(!r.verified);
 }
+
+TEST(solver_refuses_quadratic_rows_it_cannot_solve) {
+  // x y <= 4 with 0 <= x, y <= 10: until the SLP lands every QCP is refused, and with integers
+  // or a quadratic objective it stays refused; none of them may reach the MILP or QP code.
+  samaya::Model m;
+  m.obj = {-1, -1};
+  m.col_lower = {0, 0};
+  m.col_upper = {10, 10};
+  m.col_type.assign(2, samaya::VarType::kContinuous);
+  m.row_lower = {-samaya::kInf};
+  m.row_upper = {4};
+  m.A = samaya::SparseMatrix(1, 2);
+  m.row_quadratic = {{0, 0, 1, 1.0}};
+  const samaya::Solver solver;
+  CHECK(solver.solve(m).status == samaya::Status::kNotImplemented);
+  samaya::Model mip = m;
+  mip.col_type[0] = samaya::VarType::kInteger;
+  const samaya::Result r = solver.solve(mip);
+  CHECK(r.status == samaya::Status::kNotImplemented);
+  CHECK(r.message.find("integer") != std::string::npos);
+  samaya::Model qp = m;
+  qp.Q = samaya::SparseMatrix::from_triplets(2, 2, {{0, 0, 1.0}});
+  CHECK(solver.solve(qp).message.find("quadratic objective") != std::string::npos);
+  CHECK(std::string(samaya::to_string(samaya::Status::kFirstOrderStationary)) ==
+        "first_order_stationary");
+}

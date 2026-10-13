@@ -45,6 +45,14 @@ VerifyReport verify_lp_optimality(const Model& model, std::span<const double> x,
 VerifyReport verify_qp_optimality(const Model& model, std::span<const double> x,
                                   std::span<const double> y, const VerifyTolerances& tol = {});
 
+// The KKT conditions of a model with quadratic rows (Model::row_quadratic), recomputed from the
+// model: x feasible, and with d = c + Qx - J(x)'y, where J(x) is the Jacobian of the rows at x,
+// the same sign and complementarity conditions as above against the model's own bounds. This
+// certifies first-order stationarity, not a local optimum. verify_primal and the checks above
+// include the quadratic rows' terms in the activities too.
+VerifyReport verify_qcp_kkt(const Model& model, std::span<const double> x,
+                            std::span<const double> y, const VerifyTolerances& tol = {});
+
 // Checks a Farkas certificate y (one multiplier per row): the value of y'(A x) - y'r over all x
 // within the column bounds and r within the row bounds must exclude zero, which proves that
 // A x = r has no solution in the bounds.

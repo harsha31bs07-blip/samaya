@@ -12,6 +12,7 @@ const char* to_string(ProblemClass problem_class) {
     case ProblemClass::kQP: return "QP";
     case ProblemClass::kMILP: return "MILP";
     case ProblemClass::kMIQP: return "MIQP";
+    case ProblemClass::kQCP: return "QCP";
   }
   return "unknown";
 }
@@ -21,6 +22,9 @@ Index Model::num_integers() const {
 }
 
 ProblemClass Model::problem_class() const {
+  // Quadratic rows win: the solver refuses them together with integers or a quadratic
+  // objective, rather than letting the MILP or QP code ignore them.
+  if (has_quadratic_rows()) return ProblemClass::kQCP;
   if (is_mip()) return is_qp() ? ProblemClass::kMIQP : ProblemClass::kMILP;
   return is_qp() ? ProblemClass::kQP : ProblemClass::kLP;
 }
@@ -80,6 +84,17 @@ std::string Model::validate() const {
     for (NnzIndex p = q_start[j]; p < q_start[j + 1]; ++p) {
       if (q_index[p] < j) return "Q must be stored as its lower triangle";
       if (!std::isfinite(Q.values()[p])) return "Q contains a non-finite value";
+    }
+  }
+
+  for (std::size_t k = 0; k < row_quadratic.size(); ++k) {
+    const RowQuadraticTerm& t = row_quadratic[k];
+    if (t.row < 0 || t.row >= num_rows() || t.col1 < 0 || t.col2 >= num_cols() ||
+        t.col1 > t.col2) {
+      return "quadratic row term " + std::to_string(k) + " has an invalid row or column";
+    }
+    if (!std::isfinite(t.value)) {
+      return "quadratic row term " + std::to_string(k) + " is not finite";
     }
   }
 
