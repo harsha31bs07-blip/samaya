@@ -283,3 +283,57 @@ TEST(presolve_solver_results_match_reference_with_and_without_presolve) {
   }
   CHECK_EQ(failures, 0);
 }
+
+namespace {
+
+Model forcing_snapshot_lp() {
+  Model model;
+  model.obj = {-2.0, -1.0, 1.0};
+  model.col_lower = {0.0, 0.0, 0.0};
+  model.col_upper = {2.0, 2.0, 2.0};
+  model.col_type.assign(3, samaya::VarType::kContinuous);
+  model.row_lower = {-kInf, 1.0};
+  model.row_upper = {0.0, kInf};
+  model.A = samaya::SparseMatrix::from_triplets(2, 3,
+      {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 2, 1.0}});
+  return model;
+}
+
+}  // namespace
+
+TEST(presolve_forcing_snapshot_precedes_fixing) {
+  Model model = forcing_snapshot_lp();
+  Presolve p(model);
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  std::vector<double> x, y;
+  p.postsolve({}, {}, x, y);
+  CHECK_EQ(x[2], 1.0);
+  CHECK_EQ(y[1], 1.0);
+  CHECK_EQ(y[0], -3.0);
+  CHECK(samaya::verify_lp_optimality(model, x, y).ok);
+  // Postsolve must use the saved coefficients even if the source matrix changes afterwards.
+  model.A = samaya::SparseMatrix(2, 3);
+  std::vector<double> again_x, again_y;
+  p.postsolve({}, {}, again_x, again_y);
+  CHECK(again_x == x);
+  CHECK(again_y == y);
+}
+
+TEST(presolve_singleton_snapshot_independent_of_source_matrix) {
+  Model model;
+  model.obj = {1.0};
+  model.col_lower = {0.0};
+  model.col_upper = {4.0};
+  model.col_type = {samaya::VarType::kContinuous};
+  model.row_lower = {1.0, 2.0};
+  model.row_upper = {kInf, kInf};
+  model.A = samaya::SparseMatrix::from_triplets(2, 1, {{0, 0, 1.0}, {1, 0, 1.0}});
+  Presolve p(model);
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  model.A = samaya::SparseMatrix(2, 1);
+  std::vector<double> x, y;
+  p.postsolve({}, {}, x, y);
+  CHECK_EQ(x[0], 2.0);
+  CHECK_EQ(y[0], 0.0);
+  CHECK_EQ(y[1], 1.0);
+}

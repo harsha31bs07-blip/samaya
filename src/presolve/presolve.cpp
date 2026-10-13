@@ -22,8 +22,7 @@ Presolve::Presolve(const Model& model, const PresolveOptions& options)
       options_(options),
       m_(model.num_rows()),
       n_(model.num_cols()),
-      sense_(model.sense == ObjSense::kMaximize ? -1.0 : 1.0),
-      At_(model.A.transpose()) {
+      sense_(model.sense == ObjSense::kMaximize ? -1.0 : 1.0) {
   cost_.resize(static_cast<std::size_t>(n_));
   for (Index j = 0; j < n_; ++j) cost_[j] = sense_ * model.obj[j];
   offset_ = sense_ * model.obj_offset;
@@ -37,9 +36,24 @@ Presolve::Presolve(const Model& model, const PresolveOptions& options)
   col_count_.assign(static_cast<std::size_t>(n_), 0);
   const auto start = model.A.col_start();
   const auto index = model.A.row_index();
+  const auto val = model.A.values();
+  rows_.resize(static_cast<std::size_t>(m_));
+  cols_.resize(static_cast<std::size_t>(n_));
   for (Index j = 0; j < n_; ++j) {
     col_count_[j] = static_cast<Index>(start[j + 1] - start[j]);
+    cols_[j].resize(static_cast<std::size_t>(col_count_[j]));
     for (NnzIndex p = start[j]; p < start[j + 1]; ++p) ++row_count_[index[p]];
+  }
+  for (Index i = 0; i < m_; ++i) rows_[i].resize(static_cast<std::size_t>(row_count_[i]));
+  std::vector<Index> next(static_cast<std::size_t>(m_), 0);
+  // Scattering CSC columns in increasing order exactly reproduces transpose()'s row order.
+  for (Index j = 0; j < n_; ++j) {
+    auto& col = cols_[j];
+    for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
+      const Index i = index[p];
+      rows_[i][next[i]++] = {j, val[p]};
+      col[static_cast<std::size_t>(p - start[j])] = {i, val[p]};
+    }
   }
 }
 
@@ -47,35 +61,87 @@ double Presolve::tol(double v) const {
   return options_.feasibility_tol * (1.0 + (std::isfinite(v) ? std::fabs(v) : 0.0));
 }
 
+bool Presolve::add_entry(Index i, Index j, double a) {
+  if (!row_active_[i] || !col_active_[j] || a == 0.0) return false;
+  const auto by_index = [](const Entry& e, Index k) { return e.index < k; };
+  auto& row = rows_[i];
+  auto& col = cols_[j];
+  const auto r = std::lower_bound(row.begin(), row.end(), j, by_index);
+  if (r != row.end() && r->index == j) return false;
+  const auto c = std::lower_bound(col.begin(), col.end(), i, by_index);
+  row.insert(r, {j, a});
+  col.insert(c, {i, a});
+  ++row_count_[i];
+  ++col_count_[j];
+  return true;
+}
+
+bool Presolve::change_coefficient(Index i, Index j, double a) {
+  if (!row_active_[i] || !col_active_[j]) return false;
+  if (a == 0.0) return remove_entry(i, j);
+  const auto by_index = [](const Entry& e, Index k) { return e.index < k; };
+  auto& row = rows_[i];
+  auto& col = cols_[j];
+  const auto r = std::lower_bound(row.begin(), row.end(), j, by_index);
+  if (r == row.end() || r->index != j) return false;
+  const auto c = std::lower_bound(col.begin(), col.end(), i, by_index);
+  r->a = a;
+  c->a = a;
+  return true;
+}
+
+bool Presolve::remove_entry(Index i, Index j) {
+  const auto by_index = [](const Entry& e, Index k) { return e.index < k; };
+  auto& row = rows_[i];
+  auto& col = cols_[j];
+  const auto r = std::lower_bound(row.begin(), row.end(), j, by_index);
+  if (r == row.end() || r->index != j) return false;
+  const auto c = std::lower_bound(col.begin(), col.end(), i, by_index);
+  row.erase(r);
+  col.erase(c);
+  if (row_active_[i] && col_active_[j]) {
+    --row_count_[i];
+    --col_count_[j];
+  }
+  return true;
+}
+
+void Presolve::snapshot_column(Index j, std::size_t& first, std::size_t& last) {
+  first = column_terms_.size();
+  if (col_active_[j]) {
+    for (const auto& e : cols_[j]) {
+      if (row_active_[e.index]) column_terms_.push_back(e);
+    }
+  }
+  last = column_terms_.size();
+}
+
 void Presolve::remove_row(Index i) {
+  if (!row_active_[i]) return;
   row_active_[i] = 0;
+  row_count_[i] = 0;
   ++stats_.rows_removed;
-  const auto start = At_.col_start();
-  const auto index = At_.row_index();
-  for (NnzIndex p = start[i]; p < start[i + 1]; ++p) {
-    if (col_active_[index[p]]) --col_count_[index[p]];
+  for (const auto& e : rows_[i]) {
+    if (col_active_[e.index]) --col_count_[e.index];
   }
 }
 
 void Presolve::remove_col(Index j) {
+  if (!col_active_[j]) return;
   col_active_[j] = 0;
+  col_count_[j] = 0;
   ++stats_.cols_removed;
-  const auto start = model_.A.col_start();
-  const auto index = model_.A.row_index();
-  for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
-    if (row_active_[index[p]]) --row_count_[index[p]];
+  for (const auto& e : cols_[j]) {
+    if (row_active_[e.index]) --row_count_[e.index];
   }
 }
 
 void Presolve::fix_col(Index j, double value) {
-  const auto start = model_.A.col_start();
-  const auto index = model_.A.row_index();
-  const auto val = model_.A.values();
-  for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
-    const Index i = index[p];
+  for (const auto& e : cols_[j]) {
+    const Index i = e.index;
     if (!row_active_[i]) continue;
-    if (row_lower_[i] > -kInf) row_lower_[i] -= val[p] * value;
-    if (row_upper_[i] < kInf) row_upper_[i] -= val[p] * value;
+    if (row_lower_[i] > -kInf) row_lower_[i] -= e.a * value;
+    if (row_upper_[i] < kInf) row_upper_[i] -= e.a * value;
   }
   offset_ += cost_[j] * value;
   remove_col(j);
@@ -106,13 +172,10 @@ bool Presolve::set_bounds(Index j, double lower, double upper) {
 void Presolve::activity_bounds(Index i, double& min_act, double& max_act) const {
   min_act = 0.0;
   max_act = 0.0;
-  const auto start = At_.col_start();
-  const auto index = At_.row_index();
-  const auto val = At_.values();
-  for (NnzIndex p = start[i]; p < start[i + 1]; ++p) {
-    const Index j = index[p];
+  for (const auto& e : rows_[i]) {
+    const Index j = e.index;
     if (!col_active_[j]) continue;
-    const double a = val[p];
+    const double a = e.a;
     if (a > 0.0) {
       min_act += lower_[j] > -kInf ? a * lower_[j] : -kInf;
       max_act += upper_[j] < kInf ? a * upper_[j] : kInf;
@@ -124,9 +187,6 @@ void Presolve::activity_bounds(Index i, double& min_act, double& max_act) const 
 }
 
 bool Presolve::process_rows(bool& changed) {
-  const auto start = At_.col_start();
-  const auto index = At_.row_index();
-  const auto val = At_.values();
   for (Index i = 0; i < m_; ++i) {
     if (!row_active_[i]) continue;
     const double rl = row_lower_[i];
@@ -140,10 +200,10 @@ bool Presolve::process_rows(bool& changed) {
       continue;
     }
     if (row_count_[i] == 1) {
-      NnzIndex p = start[i];
-      while (!col_active_[index[p]]) ++p;
-      const Index j = index[p];
-      const double a = val[p];
+      const auto entry = std::find_if(rows_[i].begin(), rows_[i].end(),
+                                      [&](const Entry& e) { return col_active_[e.index]; });
+      const Index j = entry->index;
+      const double a = entry->a;
       double lo = a > 0.0 ? rl / a : ru / a;
       double up = a > 0.0 ? ru / a : rl / a;
       if (std::isnan(lo)) lo = -kInf;
@@ -155,6 +215,7 @@ bool Presolve::process_rows(bool& changed) {
                           .cost = cost_[j],
                           .old_lower = lower_[j],
                           .old_upper = upper_[j]});
+      snapshot_column(j, records_.back().first, records_.back().last);
       remove_row(i);
       if (!set_bounds(j, lo, up)) return false;
       ++stats_.singleton_rows;
@@ -181,12 +242,14 @@ bool Presolve::process_rows(bool& changed) {
       // Every column sits at the bound that minimizes (maximizes) the activity.
       Record record{.kind = Kind::kForcingRow, .row = i, .flag1 = force_min};
       record.first = terms_.size();
-      for (NnzIndex p = start[i]; p < start[i + 1]; ++p) {
-        const Index j = index[p];
+      for (const auto& e : rows_[i]) {
+        const Index j = e.index;
         if (!col_active_[j]) continue;
-        const double a = val[p];
+        const double a = e.a;
         const double v = (a > 0.0) == force_min ? lower_[j] : upper_[j];
-        terms_.push_back({j, a, cost_[j], v, lower_[j] < upper_[j]});
+        Term term{j, a, cost_[j], v, lower_[j] < upper_[j]};
+        snapshot_column(j, term.column_first, term.column_last);
+        terms_.push_back(term);
       }
       record.last = terms_.size();
       records_.push_back(record);
@@ -202,9 +265,6 @@ bool Presolve::process_rows(bool& changed) {
 }
 
 bool Presolve::process_cols(bool& changed) {
-  const auto start = model_.A.col_start();
-  const auto index = model_.A.row_index();
-  const auto val = model_.A.values();
   for (Index j = 0; j < n_; ++j) {
     if (!col_active_[j]) continue;
     if (lower_[j] == upper_[j]) {
@@ -218,12 +278,13 @@ bool Presolve::process_cols(bool& changed) {
     // Whether decreasing (increasing) x_j can never make an active row infeasible.
     bool down_ok = true;
     bool up_ok = true;
-    for (NnzIndex p = start[j]; p < start[j + 1] && (down_ok || up_ok); ++p) {
-      const Index i = index[p];
+    for (const auto& e : cols_[j]) {
+      if (!down_ok && !up_ok) break;
+      const Index i = e.index;
       if (!row_active_[i]) continue;
       const bool has_lower = row_lower_[i] > -kInf;
       const bool has_upper = row_upper_[i] < kInf;
-      if (val[p] > 0.0) {
+      if (e.a > 0.0) {
         down_ok = down_ok && !has_lower;
         up_ok = up_ok && !has_upper;
       } else {
@@ -242,8 +303,9 @@ bool Presolve::process_cols(bool& changed) {
       continue;  // Includes unbounded directions, which are left to the simplex.
     }
     records_.push_back({.kind = Kind::kFixCol, .col = j, .value = value});
+    const bool empty = col_count_[j] == 0;
     fix_col(j, value);
-    if (col_count_[j] == 0) {
+    if (empty) {
       ++stats_.empty_cols;
     } else {
       ++stats_.dominated_cols;
@@ -254,26 +316,20 @@ bool Presolve::process_cols(bool& changed) {
 }
 
 bool Presolve::process_singleton_cols(bool& changed) {
-  const auto start = model_.A.col_start();
-  const auto index = model_.A.row_index();
-  const auto val = model_.A.values();
-  const auto rstart = At_.col_start();
-  const auto rindex = At_.row_index();
-  const auto rval = At_.values();
   for (Index j = 0; j < n_; ++j) {
     if (!col_active_[j] || col_count_[j] != 1) continue;
     if (lower_[j] > -kInf || upper_[j] < kInf) continue;
     if (options_.mip && is_int(j)) continue;
-    NnzIndex p = start[j];
-    while (!row_active_[index[p]]) ++p;
-    const Index i = index[p];
-    const double a = val[p];
+    const auto entry = std::find_if(cols_[j].begin(), cols_[j].end(),
+                                    [&](const Entry& e) { return row_active_[e.index]; });
+    const Index i = entry->index;
+    const double a = entry->a;
     const bool equality = row_lower_[i] == row_upper_[i];
     if (!equality && cost_[j] != 0.0) continue;
 
     double row_max = 0.0;
-    for (NnzIndex q = rstart[i]; q < rstart[i + 1]; ++q) {
-      if (col_active_[rindex[q]]) row_max = std::max(row_max, std::fabs(rval[q]));
+    for (const auto& e : rows_[i]) {
+      if (col_active_[e.index]) row_max = std::max(row_max, std::fabs(e.a));
     }
     if (std::fabs(a) < kSubstitutionPivotRatio * row_max) continue;
 
@@ -285,10 +341,10 @@ bool Presolve::process_singleton_cols(bool& changed) {
                   .rhs_lower = row_lower_[i],
                   .rhs_upper = row_upper_[i]};
     record.first = terms_.size();
-    for (NnzIndex q = rstart[i]; q < rstart[i + 1]; ++q) {
-      const Index k = rindex[q];
+    for (const auto& e : rows_[i]) {
+      const Index k = e.index;
       if (k == j || !col_active_[k]) continue;
-      terms_.push_back({k, rval[q], 0.0, 0.0, false});
+      terms_.push_back({k, e.a, 0.0, 0.0, false});
     }
     record.last = terms_.size();
     if (equality && cost_[j] != 0.0) {
@@ -309,25 +365,23 @@ bool Presolve::process_singleton_cols(bool& changed) {
 }
 
 bool Presolve::process_duplicate_rows(bool& changed) {
-  const auto start = At_.col_start();
-  const auto index = At_.row_index();
-  const auto val = At_.values();
   // Hash each row's pattern and values normalized by its first active coefficient.
   const auto first_active = [&](Index i) {
-    NnzIndex p = start[i];
-    while (p < start[i + 1] && !col_active_[index[p]]) ++p;
+    std::size_t p = 0;
+    while (p < rows_[i].size() && !col_active_[rows_[i][p].index]) ++p;
     return p;
   };
   std::unordered_map<std::uint64_t, std::vector<Index>> buckets;
   for (Index i = 0; i < m_; ++i) {
     if (!row_active_[i] || row_count_[i] < 2) continue;
-    const NnzIndex p0 = first_active(i);
-    const double scale = 1.0 / val[p0];
+    const auto& row = rows_[i];
+    const std::size_t p0 = first_active(i);
+    const double scale = 1.0 / row[p0].a;
     std::uint64_t h = 1469598103934665603ULL;
-    for (NnzIndex p = p0; p < start[i + 1]; ++p) {
-      if (!col_active_[index[p]]) continue;
-      const auto q = static_cast<std::int64_t>(std::llround(val[p] * scale * 1e6));
-      h = (h ^ static_cast<std::uint64_t>(index[p])) * 1099511628211ULL;
+    for (std::size_t p = p0; p < row.size(); ++p) {
+      if (!col_active_[row[p].index]) continue;
+      const auto q = static_cast<std::int64_t>(std::llround(row[p].a * scale * 1e6));
+      h = (h ^ static_cast<std::uint64_t>(row[p].index)) * 1099511628211ULL;
       h = (h ^ static_cast<std::uint64_t>(q)) * 1099511628211ULL;
     }
     buckets[h].push_back(i);
@@ -336,17 +390,21 @@ bool Presolve::process_duplicate_rows(bool& changed) {
   // factor with a_k = factor * a_i, or 0 if the active parts are not parallel.
   const auto parallel = [&](Index i, Index k) {
     if (row_count_[i] != row_count_[k]) return 0.0;
-    NnzIndex p = first_active(i);
-    NnzIndex q = first_active(k);
-    const double factor = val[q] / val[p];
-    while (p < start[i + 1] || q < start[k + 1]) {
-      while (p < start[i + 1] && !col_active_[index[p]]) ++p;
-      while (q < start[k + 1] && !col_active_[index[q]]) ++q;
-      const bool end_i = p >= start[i + 1];
-      const bool end_k = q >= start[k + 1];
+    const auto& row_i = rows_[i];
+    const auto& row_k = rows_[k];
+    std::size_t p = first_active(i);
+    std::size_t q = first_active(k);
+    const double factor = row_k[q].a / row_i[p].a;
+    while (p < row_i.size() || q < row_k.size()) {
+      while (p < row_i.size() && !col_active_[row_i[p].index]) ++p;
+      while (q < row_k.size() && !col_active_[row_k[q].index]) ++q;
+      const bool end_i = p >= row_i.size();
+      const bool end_k = q >= row_k.size();
       if (end_i || end_k) return end_i && end_k ? factor : 0.0;
-      if (index[p] != index[q]) return 0.0;
-      if (std::fabs(val[q] - factor * val[p]) > kParallelTol * std::fabs(val[q])) return 0.0;
+      if (row_i[p].index != row_k[q].index) return 0.0;
+      if (std::fabs(row_k[q].a - factor * row_i[p].a) > kParallelTol * std::fabs(row_k[q].a)) {
+        return 0.0;
+      }
       ++p;
       ++q;
     }
@@ -440,13 +498,13 @@ void Presolve::build_reduced() {
     if (!model_.row_names.empty()) reduced_.row_names.push_back(model_.row_names[i]);
   }
   std::vector<Triplet> triplets;
-  const auto start = model_.A.col_start();
-  const auto index = model_.A.row_index();
-  const auto val = model_.A.values();
+  std::size_t nnz = 0;
+  for (const Index j : col_map_) nnz += static_cast<std::size_t>(col_count_[j]);
+  triplets.reserve(nnz);
   for (Index j = 0; j < n_; ++j) {
     if (new_col[j] < 0) continue;
-    for (NnzIndex p = start[j]; p < start[j + 1]; ++p) {
-      if (new_row[index[p]] >= 0) triplets.push_back({new_row[index[p]], new_col[j], val[p]});
+    for (const auto& e : cols_[j]) {
+      if (new_row[e.index] >= 0) triplets.push_back({new_row[e.index], new_col[j], e.a});
     }
   }
   reduced_.A = SparseMatrix::from_triplets(static_cast<Index>(row_map_.size()),
@@ -465,14 +523,14 @@ void Presolve::postsolve(const std::vector<double>& reduced_x,
     for (std::size_t k = 0; k < row_map_.size(); ++k) y[row_map_[k]] = sense_ * reduced_y[k];
   }
 
-  const auto start = model_.A.col_start();
-  const auto index = model_.A.row_index();
-  const auto val = model_.A.values();
-  // Reduced cost of column j for the model at the time of a reduction: rows removed before it
-  // still have y = 0 here.
-  const auto reduced_cost = [&](Index j, double cost) {
+  // Column snapshots preserve the coefficients and summation order at each reduction. Rows
+  // removed before that reduction still have zero duals, so their entries were omitted.
+  const auto reduced_cost = [&](std::size_t first, std::size_t last, double cost) {
     double d = cost;
-    for (NnzIndex p = start[j]; p < start[j + 1]; ++p) d -= val[p] * y[index[p]];
+    for (std::size_t t = first; t < last; ++t) {
+      const Entry& e = column_terms_[t];
+      d -= e.a * y[e.index];
+    }
     return d;
   };
   const auto at = [&](double v, double bound) {
@@ -492,7 +550,7 @@ void Presolve::postsolve(const std::vector<double>& reduced_x,
         if (!duals) break;
         // If the column rests on a bound that came from this row, the row takes its reduced
         // cost.
-        const double d = reduced_cost(r.col, r.cost);
+        const double d = reduced_cost(r.first, r.last, r.cost);
         const double v = x[r.col];
         if ((d > 0.0 && !at(v, r.old_lower)) || (d < 0.0 && !at(v, r.old_upper))) {
           y[r.row] = d / r.a;
@@ -508,7 +566,7 @@ void Presolve::postsolve(const std::vector<double>& reduced_x,
         for (std::size_t t = r.first; t < r.last; ++t) {
           const Term& term = terms_[t];
           if (!term.boxed) continue;
-          const double ratio = reduced_cost(term.col, term.cost) / term.a;
+          const double ratio = reduced_cost(term.column_first, term.column_last, term.cost) / term.a;
           yi = r.flag1 ? std::min(yi, ratio) : std::max(yi, ratio);
         }
         y[r.row] = yi;

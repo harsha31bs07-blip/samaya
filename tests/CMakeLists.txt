@@ -10,6 +10,7 @@ add_executable(samaya_tests
   test_mps_reader.cpp
   test_pdlp.cpp
   test_presolve.cpp
+  test_presolve_matrix.cpp
   test_qp.cpp
   test_ranging.cpp
   test_scaling.cpp

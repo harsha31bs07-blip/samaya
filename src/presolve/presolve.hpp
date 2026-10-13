@@ -68,6 +68,11 @@ class Presolve {
                  std::vector<double>& x, std::vector<double>& y) const;
 
  private:
+  friend struct PresolveTestAccess;
+  struct Entry {
+    Index index;  // Column in rows_, row in cols_.
+    double a;
+  };
   enum class Kind : std::uint8_t {
     kFixCol,          // Column fixed at `value` (fixed, empty or dominated).
     kRemoveRow,       // Empty or redundant row: y = 0.
@@ -83,6 +88,8 @@ class Presolve {
     double cost;   // Column cost when the reduction was made.
     double value;  // Forcing rows: the bound the column is fixed at.
     bool boxed;    // Forcing rows: the column had distinct finite-or-not bounds (lower < upper).
+    std::size_t column_first = 0;  // Column snapshot in column_terms_.
+    std::size_t column_last = 0;
   };
   struct Record {
     Kind kind;
@@ -98,12 +105,20 @@ class Presolve {
     double rhs_upper = 0.0;
     bool flag1 = false;  // Forcing: at activity minimum. Duplicate: lower bound from row2.
     bool flag2 = false;  // Duplicate: upper bound from row2.
-    std::size_t first = 0;  // Terms [first, last).
+    std::size_t first = 0;  // [first, last) in column_terms_ for singleton rows, otherwise terms_.
     std::size_t last = 0;
   };
 
   bool is_int(Index j) const { return model_.col_type[j] == VarType::kInteger; }
   double tol(double v) const;
+
+  // Sorted, unique, nonzero coefficients in both directions. Insertion/change is refused for
+  // inactive rows or columns; changing to zero removes the entry. Deactivation is logical:
+  // both lists retain the same stored entries, while counts include only active endpoints.
+  bool add_entry(Index i, Index j, double a);
+  bool change_coefficient(Index i, Index j, double a);
+  bool remove_entry(Index i, Index j);
+  void snapshot_column(Index j, std::size_t& first, std::size_t& last);
 
   void remove_row(Index i);
   void remove_col(Index j);
@@ -122,7 +137,8 @@ class Presolve {
   Index m_;
   Index n_;
   double sense_;
-  SparseMatrix At_;  // Row-wise copy of A.
+  std::vector<std::vector<Entry>> rows_;
+  std::vector<std::vector<Entry>> cols_;
 
   std::vector<double> cost_;  // Minimization costs.
   std::vector<double> lower_;
@@ -137,6 +153,7 @@ class Presolve {
 
   std::vector<Record> records_;
   std::vector<Term> terms_;
+  std::vector<Entry> column_terms_;  // Active column coefficients at the time of a reduction.
 
   Model reduced_;
   std::vector<Index> col_map_;
