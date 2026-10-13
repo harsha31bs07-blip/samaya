@@ -260,3 +260,7 @@ body.dragging .drag-veil { display: flex; }
   .kpi:nth-child(4) { border-left: 0; }
   .kpi:nth-child(n+4) { border-top: 1px solid var(--line-2); }
 }
+
+/* Sortable sensitivity table headings match the surrounding table. */
+.range-sort { color: inherit; font: inherit; border: 0; background: none; padding: 0; cursor: pointer; }
+.range-sort:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }

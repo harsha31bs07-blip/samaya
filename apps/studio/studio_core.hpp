@@ -6,6 +6,7 @@
 // bounds, integrality and the objective from the solution alone; it shares no code with samaya's
 // reader (src/io) or verifier (src/verify), so it checks them rather than repeating them.
 
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -42,11 +43,25 @@ struct SolutionFile {
   bool verified = false;
   double objective = 0.0;
   bool has_objective = false;
-  std::vector<std::pair<std::string, double>> columns;  // name, value
+  bool ranging_requested = false;
+  bool ranging_available = false;
+  std::string ranging_message;
+  struct Column {
+    std::string name;
+    double value = 0.0;
+    double reduced_cost = 0.0;
+    double cost_lower = std::numeric_limits<double>::quiet_NaN();
+    double cost_upper = std::numeric_limits<double>::quiet_NaN();
+    double level_lower = std::numeric_limits<double>::quiet_NaN();
+    double level_upper = std::numeric_limits<double>::quiet_NaN();
+  };
+  std::vector<Column> columns;
   struct Row {
     std::string name;
     double activity = 0.0;
     double dual = 0.0;
+    double level_lower = std::numeric_limits<double>::quiet_NaN();
+    double level_upper = std::numeric_limits<double>::quiet_NaN();
   };
   std::vector<Row> rows;
 };

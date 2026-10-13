@@ -288,26 +288,61 @@ void for_each_line(const std::string& text, F&& f) {
 SolutionFile read_solution(const std::string& text) {
   SolutionFile sol;
   std::string section;
+  std::vector<std::string_view> header;
   for_each_line(text, [&](std::string_view line) {
     const auto t = tokens(line);
-    if (t.empty() || t[0][0] == '#') return;
+    if (t.empty()) return;
+    if (t[0] == "#") {
+      header.assign(t.begin() + 1, t.end());
+      return;
+    }
+    if (t[0][0] == '#') return;
     if (t[0] == "columns" || t[0] == "rows" || t[0] == "infeasibility_certificate" ||
         t[0] == "unbounded_ray") {
       section = std::string(t[0]);
+      header.clear();
       return;
     }
     if (section.empty()) {
       if (t[0] == "status" && t.size() > 1) sol.status = std::string(t[1]);
       if (t[0] == "verified" && t.size() > 1) sol.verified = t[1] == "yes";
+      if (t[0] == "ranging" && t.size() > 1) {
+        sol.ranging_requested = true;
+        sol.ranging_available = t[1] == "available";
+        const auto message = line.find(t[1]) + t[1].size();
+        const auto start = line.find_first_not_of(" \t\r", message);
+        if (start != std::string_view::npos) {
+          sol.ranging_message = std::string(line.substr(start));
+          if (!sol.ranging_message.empty() && sol.ranging_message.back() == '\r') {
+            sol.ranging_message.pop_back();
+          }
+        }
+      }
       if (t[0] == "objective" && t.size() > 1) {
         sol.objective = to_double(t[1]);
         sol.has_objective = true;
       }
-    } else if (section == "columns" && t.size() >= 2) {
-      sol.columns.emplace_back(std::string(t[0]), to_double(t[1]));
-    } else if (section == "rows" && t.size() >= 2) {
-      sol.rows.push_back(
-          {std::string(t[0]), to_double(t[1]), t.size() > 2 ? to_double(t[2]) : 0.0});
+    } else if (section == "columns" || section == "rows") {
+      const auto field = [&](std::string_view key, double fallback) {
+        for (std::size_t i = 0; i < header.size() && i < t.size(); ++i) {
+          if (header[i] == key) return to_double(t[i]);
+        }
+        return fallback;
+      };
+      const auto name = std::find(header.begin(), header.end(), "name");
+      if (name == header.end()) return;
+      const auto index = static_cast<std::size_t>(name - header.begin());
+      if (index >= t.size()) return;
+      const double nan = std::numeric_limits<double>::quiet_NaN();
+      if (section == "columns") {
+        sol.columns.push_back({std::string(t[index]), field("value", 0.0),
+                               field("reduced_cost", 0.0), field("cost_lower", nan),
+                               field("cost_upper", nan), field("level_lower", nan),
+                               field("level_upper", nan)});
+      } else {
+        sol.rows.push_back({std::string(t[index]), field("activity", 0.0), field("dual", 0.0),
+                            field("level_lower", nan), field("level_upper", nan)});
+      }
     }
   });
   return sol;
@@ -450,7 +485,7 @@ Recheck recheck(const std::string& model_text, const SolutionFile& solution) {
 
   std::unordered_map<std::string, double> x;
   x.reserve(solution.columns.size());
-  for (const auto& [name, value] : solution.columns) x.emplace(name, value);
+  for (const auto& col : solution.columns) x.emplace(col.name, col.value);
 
   std::vector<Sum> activity(rows.size());
   std::vector<double> magnitude(rows.size(), 0.0);

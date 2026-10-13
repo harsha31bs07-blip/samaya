@@ -476,7 +476,8 @@ def csv_text(rows: list[list]) -> str:
 
 def build(model_path: Path, sol_path: Path, run_path: Path | None) -> dict:
     model = Mps(model_path)
-    header, x, y = read_solution(sol_path)
+    details = {}
+    header, x, y = read_solution(sol_path, details=details)
     summary, log = read_run(run_path)
     chk = recheck(model, x)
     charts, tables = plan_content(model, x, y)
@@ -524,11 +525,43 @@ def build(model_path: Path, sol_path: Path, run_path: Path | None) -> dict:
         sheets.append((t.title, rows))
     sheets.append(("Variables", [["Column", "Value"]] + variables))
     sheets.append(("Constraints", [["Row", "Activity", "Dual"]] + constraints))
+    sensitivity = []
+    ranging = details["ranging"]
+    if ranging and ranging["available"]:
+        cost_rows = [[name, col.get("value"), col.get("reduced_cost", 0.0),
+                      col.get("cost_lower"), col.get("cost_upper")]
+                     for name, col in details["columns"].items()]
+        level_rows = []
+        for section, level, dual, kind in (("columns", "value", "reduced_cost", "Column"),
+                                           ("rows", "activity", "dual", "Row")):
+            for name, record in details[section].items():
+                lo, up = record.get("level_lower", float("nan")), record.get("level_upper", float("nan"))
+                if not math.isnan(lo) and not math.isnan(up):
+                    level_rows.append([name, kind, record.get(level), record.get(dual, 0.0), lo, up])
+        sensitivity = [Table("Objective coefficient ranges", ["Column", "Value", "Reduced cost", "Cost lower", "Cost upper"], cost_rows),
+                       Table("Binding level ranges", ["Name", "Type", "Level", "Dual / reduced cost", "Level lower", "Level upper"], level_rows)]
+    if ranging:
+        sensitivity_rows = [["Sensitivity"], ["Available", "yes" if ranging["available"] else "no"],
+                            ["Message", ranging["message"]],
+                            ["Ranges apply to one change at a time with the reported basis staying optimal."]]
+        for table in sensitivity:
+            sensitivity_rows += [[], [table.title], table.header] + table.rows
+        sheets.append(("Sensitivity", [[_range_cell(v) for v in row] for row in sensitivity_rows]))
     if log:
         sheets.append(("Solver log", [["samaya output"]] + [[ln] for ln in log.split("\n")]))
     return {"info": info, "checks_samaya": checks_samaya, "checks_own": checks_own, "charts": charts,
                     "tables": tables, "variables": variables, "constraints": constraints, "log": log,
-                    "sheets": sheets, "row_name": chk["row_name"], "missing": chk["missing"]}
+                    "sheets": sheets, "row_name": chk["row_name"], "missing": chk["missing"],
+                    "ranging": ranging, "sensitivity": sensitivity}
+
+
+def _range_cell(value, *, display=False):
+    if isinstance(value, float):
+        if math.isnan(value):
+            return ""
+        if math.isinf(value):
+            return ("−∞" if value < 0 else "∞") if display else ("-inf" if value < 0 else "inf")
+    return value
 
 
 CSS = """
@@ -624,6 +657,19 @@ def render_html(rep: dict, xlsx: bytes, stem: str) -> str:
     tables = "".join(f'<div class="card"><b>{html.escape(t.title)}</b><div class="scroll">{_table_html(t)}</div>'
                                       + (f'<div class="note">{html.escape(t.note)}</div>' if t.note else "") + "</div>"
                                       for t in rep["tables"])
+    sensitivity = ""
+    if rep["ranging"]:
+        ranging = rep["ranging"]
+        sensitivity = '<h2>Sensitivity</h2><div class="card">'
+        sensitivity += f'<div class="note">{html.escape(ranging["message"])}</div>' if ranging["message"] else ""
+        if not ranging["available"]:
+            sensitivity += '<p>Sensitivity ranging is unavailable.</p>'
+        else:
+            sensitivity += '<p>Ranges apply to one change at a time with the reported basis staying optimal. Within a binding level range, the objective changes at the dual or reduced cost shown.</p>'
+            for table in rep["sensitivity"]:
+                display = Table(table.title, table.header, [[_range_cell(v, display=True) for v in row] for row in table.rows])
+                sensitivity += f'<b>{html.escape(table.title)}</b><div class="scroll">{_table_html(display)}</div>'
+        sensitivity += '</div>'
     downloads = [f'<a class="btn" download="{html.escape(stem)}.xlsx" href="{_data_uri("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", xlsx)}">⬇ Excel workbook (.xlsx)</a>']
     for name, rows in rep["sheets"]:
         downloads.append(f'<a class="btn alt" download="{html.escape(stem)}_{html.escape(name.lower().replace(" ", "_"))}.csv" '
@@ -641,6 +687,7 @@ def render_html(rep: dict, xlsx: bytes, stem: str) -> str:
 <h2>Summary</h2><div class="grid">{kpi_html}</div>
 <h2>Verification</h2>{verify}
 {"<h2>Plan</h2>" + charts + tables if charts or tables else ""}
+{sensitivity}
 <h2>Downloads</h2><div class="card">{"".join(downloads)}<div class="note">Every table in this report, as an Excel workbook or as CSV files.</div></div>
 <h2>Solver log</h2>{log}
 <h2>Full solution</h2>

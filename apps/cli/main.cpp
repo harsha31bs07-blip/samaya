@@ -76,6 +76,7 @@ void print_usage(std::FILE* out) {
                "  --no-presolve         Disable presolve\n"
                "  --crossover           After barrier or PDLP, report a basic (vertex) solution:\n"
                "                        crossover to the simplex, then verify\n"
+               "  --ranging             Compute cost and binding-bound sensitivity ranges (LP only)\n"
                "  --gpu                 Run PDLP's iterations on an NVIDIA GPU when available\n"
                "                        (with --lp-method pdlp; the CPU otherwise)\n"
                "  --gpu-info            Print, as JSON, whether this build has CUDA and which GPU\n"
@@ -125,31 +126,57 @@ std::string json_number(double v) {
   return buf;
 }
 
+// Spell nonfinite range values explicitly: MSVC can print a negative NaN as -nan(ind).
+void write_range(std::ostream& out, double value) {
+  if (std::isnan(value)) out << "nan";
+  else if (std::isinf(value)) out << (value < 0 ? "-inf" : "inf");
+  else out << value;
+}
+
 // Plain-text solution file: a header, then one line per column and per row.
 bool write_solution(const std::string& file, const samaya::Model& model,
-                    const samaya::Result& result) {
+                    const samaya::Result& result, bool ranging_requested) {
   std::ofstream out(utf8_path(file));
   if (!out) return false;
   out.precision(17);
   out << "status " << samaya::to_string(result.status) << "\n";
   out << "verified " << (result.verified ? "yes" : "no") << "\n";
+  if (ranging_requested) {
+    out << "ranging " << (result.ranging.available ? "available" : "unavailable");
+    if (!result.ranging.message.empty()) out << " " << result.ranging.message;
+    out << "\n";
+  }
   if (std::isfinite(result.objective)) out << "objective " << result.objective << "\n";
-  const bool has_duals = !result.row_dual.empty();
+  const bool has_duals = result.ranging.available || !result.row_dual.empty();
+  const auto& ranging = result.ranging;
   if (!result.col_value.empty()) {
     out << "\ncolumns " << model.num_cols() << "\n# name value" << (has_duals ? " reduced_cost" : "")
-        << "\n";
+        << (ranging.available ? " cost_lower cost_upper level_lower level_upper" : "") << "\n";
     for (samaya::Index j = 0; j < model.num_cols(); ++j) {
       out << (model.col_names.empty() ? "c" + std::to_string(j) : model.col_names[j]) << " "
           << result.col_value[j];
       if (has_duals) out << " " << result.col_dual[j];
+      if (ranging.available) {
+        for (double value : {ranging.cost_lower[j], ranging.cost_upper[j],
+                             ranging.col_level_lower[j], ranging.col_level_upper[j]}) {
+          out << " ";
+          write_range(out, value);
+        }
+      }
       out << "\n";
     }
     out << "\nrows " << model.num_rows() << "\n# name activity" << (has_duals ? " dual" : "")
-        << "\n";
+        << (ranging.available ? " level_lower level_upper" : "") << "\n";
     for (samaya::Index i = 0; i < model.num_rows(); ++i) {
       out << (model.row_names.empty() ? "r" + std::to_string(i) : model.row_names[i]) << " "
           << result.row_activity[i];
       if (has_duals) out << " " << result.row_dual[i];
+      if (ranging.available) {
+        out << " ";
+        write_range(out, ranging.row_level_lower[i]);
+        out << " ";
+        write_range(out, ranging.row_level_upper[i]);
+      }
       out << "\n";
     }
   }
@@ -280,6 +307,8 @@ int main(int argc, char** argv) {
       params.presolve = false;
     } else if (arg == "--crossover") {
       params.crossover = true;
+    } else if (arg == "--ranging") {
+      params.ranging = true;
     } else if (arg == "--gpu") {
       params.use_gpu = true;
     } else if (arg == "--log-level") {
@@ -307,8 +336,9 @@ int main(int argc, char** argv) {
   } catch (const std::exception& e) {
     std::fprintf(stderr, "samaya: error reading '%s': %s\n", path.c_str(), e.what());
     if (json) {
-      std::printf("{\"instance\":%s,\"status\":\"read_error\",\"message\":%s}\n",
-                  json_string(path).c_str(), json_string(e.what()).c_str());
+      std::printf("{\"instance\":%s,\"status\":\"read_error\",\"message\":%s,\"ranging\":%s}\n",
+                  json_string(path).c_str(), json_string(e.what()).c_str(),
+                  params.ranging ? "{\"available\":false,\"message\":\"model could not be read\"}" : "null");
     }
     return kExitReadError;
   }
@@ -337,11 +367,15 @@ int main(int argc, char** argv) {
   samaya::Result result;
   if (!stats_only) result = samaya::Solver(params).solve(model);
 
-  if (!solution_path.empty() && !stats_only && !write_solution(solution_path, model, result)) {
+  if (!solution_path.empty() && !stats_only && !write_solution(solution_path, model, result, params.ranging)) {
     std::fprintf(stderr, "samaya: cannot write solution to '%s'\n", solution_path.c_str());
   }
 
   if (json) {
+    const std::string ranging_json = params.ranging
+        ? "{\"available\":" + std::string(result.ranging.available ? "true" : "false") +
+          ",\"message\":" + json_string(result.ranging.message) + "}"
+        : "null";
     std::printf(
         "{\"instance\":%s,\"name\":%s,\"class\":\"%s\",\"rows\":%d,\"cols\":%d,\"nnz\":%lld,"
         "\"integers\":%d,\"status\":\"%s\",\"verified\":%s,\"objective\":%s,"
@@ -349,7 +383,7 @@ int main(int argc, char** argv) {
         "\"simplex_iterations\":%lld,\"barrier_iterations\":%lld,\"crossover\":%s,"
         "\"read_seconds\":%s,"
         "\"solve_seconds\":%s,\"nodes\":%lld,"
-        "\"message\":%s}\n",
+        "\"message\":%s,\"ranging\":%s}\n",
         json_string(path).c_str(), json_string(model.name).c_str(),
         samaya::to_string(model.problem_class()), stats.rows, stats.cols,
         static_cast<long long>(stats.nnz), stats.integers, samaya::to_string(result.status),
@@ -358,7 +392,7 @@ int main(int argc, char** argv) {
         json_number(result.max_dual_violation).c_str(), result.simplex_iterations,
         result.barrier_iterations, result.crossover ? "true" : "false",
         json_number(read_seconds).c_str(), json_number(result.solve_seconds).c_str(),
-        result.nodes, json_string(result.message).c_str());
+        result.nodes, json_string(result.message).c_str(), ranging_json.c_str());
   }
   return kExitOk;
 }

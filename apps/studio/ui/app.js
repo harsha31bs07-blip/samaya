@@ -11,7 +11,7 @@
   const TOL = 1e-6;  // the verifier's default tolerances (include/samaya/verify.hpp)
 
   const state = { cases: [], selected: null, compare: null, rerun: null, nextId: 1, samples: [], gpu: null, cuda: false,
-                  tab: "overview", filter: "" };
+                  tab: "overview", filter: "", sensitivitySort: {} };
 
   // ---------------------------------------------------------------------------------------------
   // Formatting.
@@ -163,6 +163,7 @@
       lpMethod: $("#opt-method").value,
       presolve: $("#opt-presolve").checked,
       gpu: $("#opt-compute").value === "gpu",
+      ranging: $("#opt-ranging").checked,
     };
   }
   // The GPU samaya.exe reported (--gpu-info). The GPU runs PDLP, so choosing it selects PDLP.
@@ -193,6 +194,7 @@
     $("#opt-gap").value = +(o.mipGap * 100).toPrecision(6);
     $("#opt-method").value = o.lpMethod;
     $("#opt-presolve").checked = o.presolve;
+    $("#opt-ranging").checked = !!o.ranging;
     $("#opt-compute").value = o.gpu && state.gpu ? "gpu" : "cpu";
     computeChanged();
     if (!o.gpu) $("#opt-method").value = o.lpMethod;
@@ -202,7 +204,7 @@
     return [["Start date", o.startDate ? cellText(parseDate(o.startDate)) : "–"], ["Time limit", `${o.timeLimit} s`],
             ["Threads", o.threads ? String(o.threads) : "automatic"], ["MIP gap", `${+(o.mipGap * 100).toPrecision(6)} %`],
             ["LP method", METHOD[o.lpMethod] || o.lpMethod], ["Presolve", o.presolve ? "on" : "off"],
-            ["Compute", o.gpu ? "NVIDIA GPU" : "CPU"]];
+            ["Compute", o.gpu ? "NVIDIA GPU" : "CPU"], ["Sensitivity ranging", o.ranging ? "on" : "off"]];
   }
   const settingsText = (o) => settingsRows(o).map(([k, v]) => `${k.toLowerCase()} ${v}`).join(", ");
 
@@ -217,7 +219,7 @@
   }
   // New case: the settings page with every setting back to its default, and the drop area
   // highlighted, so the click always shows that a fresh case starts.
-  const DEFAULTS = { timeLimit: 60, threads: 0, mipGap: 0.0001, lpMethod: "auto", presolve: true, gpu: false };
+  const DEFAULTS = { timeLimit: 60, threads: 0, mipGap: 0.0001, lpMethod: "auto", presolve: true, gpu: false, ranging: false };
   function newCase() {
     state.selected = null;
     state.compare = null;
@@ -303,6 +305,7 @@
     "mrpl_crude_small.mps": ["MILP", "14 days"], "mrpl_crude_medium.mps": ["MILP", "21 days"],
     "mrpl_plan_small.mps": ["LP", "4 weeks"], "mrpl_plan_medium.mps": ["LP", "13 weeks"],
     "mrpl_utility_small.mps": ["MILP", "24 hours"], "mrpl_utility_medium.mps": ["MILP", "48 hours"],
+    "sensitivity_lp.mps": ["LP", ""],
   };
   function renderSamples() {
     const box = $("#samples");
@@ -374,6 +377,7 @@
     const kpis = kpiCells(c).map(([l, v, sub]) => `<div class="kpi"><div class="l">${esc(l)}</div><div class="v" title="${esc(v)}">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`).join("");
     const unit = periodUnit(s.name);
     const TABS = [["overview", "Overview"], ["plan", unit === "week" ? "Plan" : unit ? "Schedule" : "Results"], ["verification", "Verification"], ["solution", "Solution"], ["log", "Log"]];
+    if (c.result.ranging) TABS.splice(3, 0, ["sensitivity", "Sensitivity"]);
     const tabs = TABS.map(([t, n]) => `<button class="tab ${state.tab === t ? "active" : ""}" data-tab="${t}">${n}</button>`).join("");
     return header(c, tags) + `<div class="kpis">${kpis}</div><div class="tabs">${tabs}</div><div id="tab-body">${tabBody(c)}</div>`;
   }
@@ -385,6 +389,7 @@
       case "plan": return planTab(c);
       case "verification": return verificationTab(c);
       case "solution": return solutionTab(c);
+      case "sensitivity": return sensitivityTab(c);
       case "log": return panel("Solver log", `<div class="log">${colorLog(c.result.log || c.log.join("\n"))}</div>`);
       default: return overviewTab(c);
     }
@@ -449,6 +454,36 @@
       ${panel(`Constraints (${num(rows.length, 12)}${q ? ", matching" : ""})`,
         `<div class="scroll"><table><thead><tr><th>Row</th><th class="num">Activity</th><th class="num">Dual</th></tr></thead><tbody>${t2}</tbody></table></div>${more(rows.length)}`)}</div>
       ${R.truncated ? `<div class="note">This model is large: Studio shows part of the solution; the solution file has every value.</div>` : ""}`;
+  }
+
+  function rangeText(value) {
+    if (value == null || Number.isNaN(value)) return "";
+    if (value === "inf" || value === Infinity) return "∞";
+    if (value === "-inf" || value === -Infinity) return "−∞";
+    return cellText(value);
+  }
+  function sensitivityTab(c) {
+    const R = c.result, ranging = R.ranging;
+    if (!ranging) return panel("Sensitivity", '<div class="note">Sensitivity ranging was not requested.</div>');
+    const note = ranging.message ? `<div class="note">${esc(ranging.message)}</div>` : "";
+    if (!ranging.available) return panel("Sensitivity", `<div class="panel-body">Sensitivity ranging is unavailable.</div>${note}`);
+    const tables = Xlsx.sensitivityTables(R).map((t, tableIndex) => {
+      const [header, ...body] = t.rows, order = state.sensitivitySort[tableIndex] || { column: 0, direction: 1 };
+      const numeric = (v) => v === "inf" ? Infinity : v === "-inf" ? -Infinity : v;
+      body.sort((a, b) => {
+        const x = numeric(a[order.column]), y = numeric(b[order.column]);
+        if (x == null || Number.isNaN(x)) return y == null || Number.isNaN(y) ? 0 : 1;
+        if (y == null || Number.isNaN(y)) return -1;
+        return order.direction * (typeof x === "number" && typeof y === "number" ? (x < y ? -1 : x > y ? 1 : 0)
+          : String(x).localeCompare(String(y)));
+      });
+      const head = header.map((h, i) => `<th aria-sort="${i === order.column ? order.direction > 0 ? "ascending" : "descending" : "none"}"><button class="range-sort" data-range-table="${tableIndex}" data-range-column="${i}">${esc(h)}${i === order.column ? order.direction > 0 ? " ▲" : " ▼" : ""}</button></th>`).join("");
+      const rows = body.slice(0, 2000).map((r) => `<tr>${r.map((v) => `<td class="${typeof v === "number" || v === "inf" || v === "-inf" ? "num" : ""}">${esc(rangeText(v))}</td>`).join("")}</tr>`).join("");
+      return panel(t.title, `<div class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>` +
+        (body.length > 2000 ? `<div class="note">Showing 2000 of ${num(body.length)}; the Excel file has all loaded values.</div>` : ""));
+    }).join("");
+    return panel("Sensitivity", `<div class="note">Ranges apply to one change at a time with the reported basis staying optimal. Within a binding level range, the objective changes at the dual or reduced cost shown.</div>${note}`) + tables +
+      (R.truncated ? '<div class="note">Studio loaded part of the solution; the solution file has every range.</div>' : "");
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -605,8 +640,10 @@
       ...own.map(([n, v, t]) => [n, "samaya verifier", v, t, v <= t ? "yes" : "no"]),
       ...ind.map(([n, v, t]) => [n, "samaya Studio re-check (from the model file)", v, t, v <= t ? "yes" : "no"])]]);
     for (const t of plan.tables) out.push([t.title, t.note ? t.rows.concat([[t.note]]) : t.rows]);
-    out.push(["Variables", [["Column", "Value"], ...(R.cols || [])]]);
-    out.push(["Constraints", [["Row", "Activity", "Dual"], ...(R.rowsData || [])]]);
+    out.push(["Variables", [["Column", "Value"], ...(R.cols || []).map((r) => r.slice(0, 2))]]);
+    out.push(["Constraints", [["Row", "Activity", "Dual"], ...(R.rowsData || []).map((r) => r.slice(0, 3))]]);
+    const sensitivity = Xlsx.sensitivitySheet(R);
+    if (sensitivity) out.push(sensitivity);
     out.push(["Solver log", [["samaya output"], ...String(R.log || "").split("\n").map((l) => [l])]]);
     return out;
   }
@@ -643,6 +680,12 @@
   function wireCase(c) {
     const page = $("#case");
     page.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => { state.tab = b.dataset.tab; render(); }));
+    page.querySelectorAll("[data-range-column]").forEach((b) => b.addEventListener("click", () => {
+      const table = Number(b.dataset.rangeTable), column = Number(b.dataset.rangeColumn);
+      const previous = state.sensitivitySort[table] || { column: 0, direction: 1 };
+      state.sensitivitySort[table] = { column, direction: previous.column === column ? -previous.direction : 1 };
+      render();
+    }));
     page.querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => {
       const a = b.dataset.act;
       if (a === "back") back(c || state.cases.find((x) => x.path === state.compare && x.status === "done"));
@@ -726,11 +769,21 @@
   // ---------------------------------------------------------------------------------------------
   // Mock host (plain browser): replays a recorded solve of the crude scheduling case.
   function mockHost(msg) {
-    const M = window.SAMAYA_MOCK;
+    let M = msg.path?.includes("sensitivity_lp") ? window.SAMAYA_RANGING_MOCK : window.SAMAYA_MOCK;
+    if (msg.type === "solve") {
+      M = Object.assign({}, M);
+      M.ranging = msg.options.ranging ? M.ranging || { available: false, message: "Sensitivity ranging is only available for LPs." } : null;
+      M.summary = Object.assign({}, M.summary, { ranging: M.ranging });
+      if (!M.ranging?.available) {
+        M.cols = M.cols.map((r) => r.slice(0, 3));
+        M.rowsData = M.rowsData.map((r) => r.slice(0, 3));
+      }
+    }
     if (msg.type === "ready") setTimeout(() => onHost({ type: "init", version: "0.1.0", cores: 16, gpu: false,
       samples: [{ name: "mrpl_crude_small.mps", label: "Crude receipt schedule", path: "samples\\mrpl_crude_small.mps" },
                 { name: "mrpl_plan_small.mps", label: "Refinery plan", path: "samples\\mrpl_plan_small.mps" },
-                { name: "mrpl_utility_small.mps", label: "Steam and power", path: "samples\\mrpl_utility_small.mps" }] }), 0);
+                { name: "mrpl_utility_small.mps", label: "Steam and power", path: "samples\\mrpl_utility_small.mps" },
+                { name: "sensitivity_lp.mps", label: "Sensitivity example (LP)", path: "samples\\sensitivity_lp.mps" }] }), 0);
     if (msg.type === "ready") setTimeout(() => onHost({ type: "gpu", info: { cuda: true, gpu: demo.get("gpu") || null } }), 0);
     if (msg.type === "pick") onHost({ type: "picked", files: [{ name: "mrpl_crude_small.mps", path: M.path }] });
     if (msg.type === "solve") {
@@ -772,7 +825,9 @@
   if (!host && demo.has("demo")) {
     setTimeout(() => {
       if (demo.get("start")) $("#opt-start").value = demo.get("start");
-      addCases([{ name: "mrpl_crude_small.mps", path: window.SAMAYA_MOCK.path }]);
+      if (demo.has("ranging")) $("#opt-ranging").checked = true;
+      addCases(demo.has("ranging") ? [{ name: "sensitivity_lp.mps", path: window.SAMAYA_RANGING_MOCK.path }]
+        : [{ name: "mrpl_crude_small.mps", path: window.SAMAYA_MOCK.path }]);
       if (demo.get("tab")) window.studio.select(demo.get("tab"));
       if (demo.has("back")) window.studio.back();
     }, 0);

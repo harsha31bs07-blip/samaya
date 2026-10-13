@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cwchar>
 #include <filesystem>
@@ -275,6 +276,7 @@ void solve(long long id, const std::string& model, const studio::Json& options) 
   cmd += L" --lp-method " + widen(method);
   if (!options.flag("presolve", true)) cmd += L" --no-presolve";
   if (options.flag("gpu", false)) cmd += L" --gpu";  // PDLP's iterations on the NVIDIA GPU
+  if (options.flag("ranging", false)) cmd += L" --ranging";
   cmd += L" " + quote(widen(model));
 
   SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
@@ -382,16 +384,39 @@ void solve(long long id, const std::string& model, const studio::Json& options) 
               ",\"missing\":" + std::to_string(chk.missing) + "}";
     // At most this many entries go to the page; the solution file keeps every value.
     constexpr std::size_t kMaxEntries = 200000;
+    // JSON has no infinities: preserve open sides as text and nonbinding NaNs as null.
+    const auto range_number = [](double value) {
+      if (std::isinf(value)) return studio::json_string(value < 0 ? "-inf" : "inf");
+      return studio::json_number(value);
+    };
+    result += ",\"ranging\":";
+    if (sol.ranging_requested) {
+      result += "{\"available\":" + std::string(sol.ranging_available ? "true" : "false") +
+                ",\"message\":" + studio::json_string(sol.ranging_message) + "}";
+    } else {
+      result += "null";
+    }
     result += ",\"cols\":[";
     for (std::size_t j = 0; j < sol.columns.size() && j < kMaxEntries; ++j) {
       if (j) result += ",";
-      result += "[" + studio::json_string(sol.columns[j].first) + "," + studio::json_number(sol.columns[j].second) + "]";
+      const auto& col = sol.columns[j];
+      result += "[" + studio::json_string(col.name) + "," + studio::json_number(col.value) +
+                "," + studio::json_number(col.reduced_cost);
+      if (sol.ranging_available) {
+        result += "," + range_number(col.cost_lower) + "," + range_number(col.cost_upper) +
+                  "," + range_number(col.level_lower) + "," + range_number(col.level_upper);
+      }
+      result += "]";
     }
     result += "],\"rowsData\":[";
     for (std::size_t i = 0; i < sol.rows.size() && i < kMaxEntries; ++i) {
       if (i) result += ",";
       const auto& r = sol.rows[i];
-      result += "[" + studio::json_string(r.name) + "," + studio::json_number(r.activity) + "," + studio::json_number(r.dual) + "]";
+      result += "[" + studio::json_string(r.name) + "," + studio::json_number(r.activity) + "," + studio::json_number(r.dual);
+      if (sol.ranging_available) {
+        result += "," + range_number(r.level_lower) + "," + range_number(r.level_upper);
+      }
+      result += "]";
     }
     result += "],\"truncated\":" + std::string(sol.columns.size() > kMaxEntries || sol.rows.size() > kMaxEntries ? "true" : "false");
     result += ",\"solutionPath\":" + studio::json_string(narrow(job->solution.wstring())) + "}";

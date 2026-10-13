@@ -52,9 +52,55 @@ TEST(studio_reads_solution_files) {
   CHECK(s.verified);
   CHECK_EQ(s.objective, 12.5);
   REQUIRE(s.columns.size() == 2);
-  CHECK_EQ(s.columns[1].first, std::string("y"));
+  CHECK_EQ(s.columns[1].name, std::string("y"));
+  CHECK_EQ(s.columns[1].reduced_cost, -0.5);
+  CHECK(!s.ranging_requested);
+  CHECK(std::isnan(s.columns[1].cost_lower));
   REQUIRE(s.rows.size() == 1);
   CHECK_EQ(s.rows[0].dual, 2.5);
+}
+
+TEST(studio_reads_ranging_by_header_with_inf_nan_and_message) {
+  const studio::SolutionFile s = studio::read_solution(
+      "status optimal\r\nverified yes\r\nranging available alternative optimal vertex\r\n"
+      "objective 12.5\n\ncolumns 2\n"
+      "# name value reduced_cost cost_lower cost_upper level_lower level_upper\n"
+      "x 3 0 -inf 4 nan nan\ny 1 -0.5 2 inf 0 inf\n\nrows 2\n"
+      "# dual name level_upper activity level_lower\n2.5 c1 inf 4 -inf\n0 c2 nan 2 nan\n");
+  CHECK(s.ranging_requested);
+  CHECK(s.ranging_available);
+  CHECK_EQ(s.ranging_message, std::string("alternative optimal vertex"));
+  REQUIRE(s.columns.size() == 2);
+  CHECK_EQ(s.columns[0].cost_lower, -INFINITY);
+  CHECK_EQ(s.columns[0].cost_upper, 4.0);
+  CHECK(std::isnan(s.columns[0].level_lower));
+  CHECK(std::isnan(s.columns[0].level_upper));
+  CHECK_EQ(s.columns[1].cost_lower, 2.0);
+  CHECK_EQ(s.columns[1].cost_upper, INFINITY);
+  CHECK_EQ(s.columns[1].level_lower, 0.0);
+  CHECK_EQ(s.columns[1].level_upper, INFINITY);
+  REQUIRE(s.rows.size() == 2);
+  CHECK_EQ(s.rows[0].name, std::string("c1"));
+  CHECK_EQ(s.rows[0].activity, 4.0);
+  CHECK_EQ(s.rows[0].dual, 2.5);
+  CHECK_EQ(s.rows[0].level_lower, -INFINITY);
+  CHECK_EQ(s.rows[0].level_upper, INFINITY);
+  CHECK(std::isnan(s.rows[1].level_lower));
+}
+
+TEST(studio_reads_ranging_unavailable_and_old_primal_only_format) {
+  const studio::SolutionFile s = studio::read_solution(
+      "status optimal\nverified yes\nranging unavailable only available for LPs\n"
+      "columns 1\n# value name\n3 x\nrows 1\n# activity name\n4 c1\n");
+  CHECK(s.ranging_requested);
+  CHECK(!s.ranging_available);
+  CHECK_EQ(s.ranging_message, std::string("only available for LPs"));
+  REQUIRE(s.columns.size() == 1);
+  CHECK_EQ(s.columns[0].value, 3.0);
+  CHECK_EQ(s.columns[0].reduced_cost, 0.0);
+  REQUIRE(s.rows.size() == 1);
+  CHECK_EQ(s.rows[0].dual, 0.0);
+  CHECK(std::isnan(s.rows[0].level_upper));
 }
 
 TEST(studio_recheck_accepts_the_optimum_and_catches_violations) {

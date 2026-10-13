@@ -59,6 +59,7 @@
     const st = bold ? ' s="1"' : "";
     if (v instanceof Date) return `<c r="${ref}" s="${bold ? 1 : 2}"><v>${serial(v)}</v></c>`;
     if (v && v.dateTime instanceof Date) return `<c r="${ref}" s="${bold ? 1 : 3}"><v>${serial(v.dateTime)}</v></c>`;
+    if (typeof v === "number" && !isFinite(v)) v = Number.isNaN(v) ? "" : v < 0 ? "-inf" : "inf";
     if (typeof v === "number" && isFinite(v)) return `<c r="${ref}"${st}><v>${v}</v></c>`;
     return `<c r="${ref}" t="inlineStr"${st}><is><t xml:space="preserve">${xmlEsc(v ?? "")}</t></is></c>`;
   }
@@ -136,5 +137,30 @@
     return btoa(s);
   }
 
-  window.Xlsx = { workbook, csv, zip, base64, crc32 };
+  // The host preserves open range sides as "inf" / "-inf", and nonbinding levels as null.
+  function sensitivityTables(result) {
+    if (!result.ranging?.available) return [];
+    const columns = result.cols || [], rows = result.rowsData || [];
+    const binding = (lo, up) => lo != null && up != null && !Number.isNaN(lo) && !Number.isNaN(up);
+    return [
+      { title: "Objective coefficient ranges", rows: [["Column", "Value", "Reduced cost", "Cost lower", "Cost upper"],
+        ...columns.map(([n, v, d, lo, up]) => [n, v, d, lo, up])] },
+      { title: "Binding level ranges", rows: [["Name", "Type", "Level", "Dual / reduced cost", "Level lower", "Level upper"],
+        ...columns.filter((c) => binding(c[5], c[6])).map(([n, v, d, , , lo, up]) => [n, "Column", v, d, lo, up]),
+        ...rows.filter((r) => binding(r[3], r[4])).map(([n, v, d, lo, up]) => [n, "Row", v, d, lo, up])] },
+    ];
+  }
+  function sensitivitySheet(result) {
+    if (!result.ranging) return null;
+    const rows = [["Sensitivity"], ["Available", result.ranging.available ? "yes" : "no"],
+      ["Message", result.ranging.message || ""],
+      ["Ranges apply to one change at a time with the reported basis staying optimal."]];
+    for (const t of sensitivityTables(result)) {
+      rows.push([], [t.title]);
+      for (const row of t.rows) rows.push(row);
+    }
+    return ["Sensitivity", rows];
+  }
+
+  window.Xlsx = { workbook, csv, zip, base64, crc32, sensitivityTables, sensitivitySheet };
 })();

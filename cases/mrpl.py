@@ -402,24 +402,44 @@ def generate(out: Path, seed: int, update: int | None = None) -> None:
             print(f"{path}: {len(model.rows)} rows, {len(model.cols)} columns ({n_int} integer)")
 
 
-def read_solution(path: Path) -> tuple[dict[str, str], dict[str, float], dict[str, float]]:
+def read_solution(path: Path, *, details: dict | None = None) -> tuple[dict[str, str], dict[str, float], dict[str, float]]:
+    """Keep the header/values/duals return; optional details receives all named fields and ranging."""
     header: dict[str, str] = {}
     values: dict[str, float] = {}
     duals: dict[str, float] = {}
     section = None
-    for line in path.read_text().splitlines():
-        if not line or line.startswith("#"):
-            continue
+    fields = []
+    data = {"columns": {}, "rows": {}, "ranging": None}
+    for line in path.read_text(encoding="utf-8").splitlines():
         parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "#":
+            fields = parts[1:]
+            continue
+        if parts[0].startswith("#"):
+            continue
         if parts[0] in ("columns", "rows", "infeasibility_certificate", "unbounded_ray"):
             section = parts[0]
+            fields = []
             continue
         if section is None:
             header[parts[0]] = " ".join(parts[1:])
-        elif section == "columns":
-            values[parts[0]] = float(parts[1])
-        elif section == "rows" and len(parts) > 2:
-            duals[parts[0]] = float(parts[2])
+            if parts[0] == "ranging":
+                data["ranging"] = {"available": parts[1] == "available", "message": " ".join(parts[2:])}
+        elif section in ("columns", "rows"):
+            record = dict(zip(fields, parts))
+            name = record.pop("name", None)
+            if name is None:
+                continue
+            numbers = {key: float(value) for key, value in record.items()}
+            data[section][name] = numbers
+            if section == "columns":
+                values[name] = numbers.get("value", 0.0)
+            elif "dual" in numbers:
+                duals[name] = numbers["dual"]
+    if details is not None:
+        details.update(data)
     return header, values, duals
 
 
