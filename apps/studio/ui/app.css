@@ -212,6 +212,7 @@ tr.changed td { font-weight: 600; }
 .verdict { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border: 1px solid; border-radius: 4px; }
 .verdict svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .verdict.ok { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-line); }
+.verdict.info { color: var(--accent); background: var(--accent-soft); border-color: var(--line); }
 .verdict.bad { color: var(--bad); background: var(--bad-bg); border-color: var(--bad-line); }
 .verdict.warn { color: var(--warn); background: var(--warn-bg); border-color: var(--warn-line); }
 .note { color: var(--muted); font-size: 12px; padding: 8px 14px 10px; }

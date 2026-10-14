@@ -67,7 +67,7 @@ void print_usage(std::FILE* out) {
                "  --stats               Print model statistics and exit without solving\n"
                "  --json                Print a JSON run summary as the last line of output\n"
                "  --solution <file>     Write status, objective, primal and dual values to a file\n"
-               "  --mip-start <file>    Start a MILP from a solution file written by --solution\n"
+               "  --mip-start <file>    Start a MILP or quadratic-row model from a --solution file\n"
                "                        (columns matched by name; e.g. yesterday's plan)\n"
                "  --time-limit <sec>    Wall-clock time limit\n"
                "  --threads <n>         Worker threads (0 = all cores)\n"
@@ -381,6 +381,7 @@ int main(int argc, char** argv) {
         "\"integers\":%d,\"status\":\"%s\",\"verified\":%s,\"objective\":%s,"
         "\"dual_bound\":%s,\"max_primal_violation\":%s,\"max_dual_violation\":%s,"
         "\"simplex_iterations\":%lld,\"barrier_iterations\":%lld,\"crossover\":%s,"
+        "\"slp_iterations\":%lld,\"max_nonlinear_violation\":%s,"
         "\"read_seconds\":%s,"
         "\"solve_seconds\":%s,\"nodes\":%lld,"
         "\"message\":%s,\"ranging\":%s}\n",
@@ -391,6 +392,7 @@ int main(int argc, char** argv) {
         json_number(result.dual_bound).c_str(), json_number(result.max_primal_violation).c_str(),
         json_number(result.max_dual_violation).c_str(), result.simplex_iterations,
         result.barrier_iterations, result.crossover ? "true" : "false",
+        result.slp_iterations, json_number(result.max_nonlinear_violation).c_str(),
         json_number(read_seconds).c_str(), json_number(result.solve_seconds).c_str(),
         result.nodes, json_string(result.message).c_str(), ranging_json.c_str());
   }

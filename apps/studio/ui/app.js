@@ -31,6 +31,7 @@
       : /^\d+$/.test(w) ? w : w[0].toUpperCase() + w.slice(1)).join(" ");
   }
   const STATUS = {
+    first_order_stationary: ["Stationary (KKT)", "info"],
     optimal: ["Optimal", "ok"], infeasible: ["Infeasible", "info"], unbounded: ["Unbounded", "info"],
     infeasible_or_unbounded: ["Infeasible or unbounded", "info"], time_limit: ["Time limit", "warn"],
     iteration_limit: ["Iteration limit", "warn"], node_limit: ["Node limit", "warn"], numerical_error: ["Numerical error", "bad"],
@@ -360,11 +361,11 @@
 
   function kpiCells(c) {
     const R = c.result, s = R.summary || {};
-    const gap = isFinite(s.objective) && isFinite(s.dual_bound) ? Math.abs(s.objective - s.dual_bound) / Math.max(1e-9, Math.abs(s.objective)) : NaN;
+    const gap = Number.isFinite(s.objective) && Number.isFinite(s.dual_bound) ? Math.abs(s.objective - s.dual_bound) / Math.max(1e-9, Math.abs(s.objective)) : NaN;
     const plan = planContent(c), span = plan.time ? plan.time.span() : null;
     return [
       ["Objective" + (R.sense ? ` (${R.sense})` : ""), num(s.objective), ""],
-      ["Best bound", num(s.dual_bound), isFinite(gap) ? `gap ${(gap * 100).toFixed(3)} %` : ""],
+      ["Best bound", Number.isFinite(s.dual_bound) ? num(s.dual_bound) : "\u2014", isFinite(gap) ? `gap ${(gap * 100).toFixed(3)} %` : ""],
       ["Horizon", span ? span[0] : "–", span ? span[1] : "no calendar for this model"],
       ["Solve time", secs(s.solve_seconds), gpuUse(c)[0] ? "PDLP iterations on the GPU" : `read ${secs(s.read_seconds)}`],
       ["Model size", `${num(s.rows, 12)} × ${num(s.cols, 12)}`, `${num(s.nnz, 12)} nonzeros`],
@@ -399,8 +400,9 @@
     const R = c.result, s = R.summary || {}, k = R.recheck || null, mip = (s.integers || 0) > 0;
     const own = [["Primal feasibility (rows and bounds)", s.max_primal_violation, TOL]];
     if (s.status === "optimal") own.push([mip ? "Dual feasibility (final LP)" : "Dual feasibility (optimality certificate)", s.max_dual_violation, TOL]);
+    if (s.status === "first_order_stationary") own.push(["First-order (KKT) conditions", s.max_dual_violation, TOL]);
     const ind = k && k.available !== false ? [
-      ["Rows: worst relative violation", k.rows, TOL], ["Bounds: worst relative violation", k.bounds, TOL],
+      ...(s.class === "QCP" ? [] : [["Rows: worst relative violation", k.rows, TOL]]), ["Bounds: worst relative violation", k.bounds, TOL],
       ["Integrality: worst distance to an integer", k.integrality, TOL], ["Objective recomputed from the model (relative difference)", k.objectiveDiff, TOL],
     ] : [];
     return { own, ind };
@@ -415,9 +417,13 @@
     const s = c.result.summary || {}, { own, ind } = checks(c);
     const ok = s.verified && passes(own) && passes(ind);
     const icon = ok ? `<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>` : `<svg viewBox="0 0 24 24"><path d="M12 8v5M12 17h.01"/><circle cx="12" cy="12" r="10"/></svg>`;
-    const what = s.status === "optimal" ? "Optimal solution" : s.status === "infeasible" ? "The model is infeasible (certificate checked)"
+    const stationary = s.status === "first_order_stationary";
+    const what = stationary ? "Feasible point where the first-order (KKT) conditions hold; local optimality is not certified" : s.status === "optimal" ? "Optimal solution" : s.status === "infeasible" ? "The model is infeasible (certificate checked)"
       : s.status === "unbounded" ? "The model is unbounded (ray checked)" : `Status: ${statusOf(s.status)[0].toLowerCase()}`;
-    return `<div class="verdict ${ok ? "ok" : "bad"}">${icon}<div><b>${esc(what)}.</b> ${ok ? "Verified by samaya and re-checked independently from the model file: every check passed." : "See the checks below."}</div></div>`;
+    const verification = s.class === "QCP"
+      ? "Verified by samaya; independent bounds, integrality and objective checks passed. Studio does not independently re-check quadratic rows."
+      : "Verified by samaya and re-checked independently from the model file: every check passed.";
+    return `<div class="verdict ${!ok ? "bad" : stationary ? "info" : "ok"}">${icon}<div><b>${esc(what)}.</b> ${ok ? verification : "See the checks below."}</div></div>`;
   }
   function overviewTab(c) {
     const R = c.result, s = R.summary || {}, plan = planContent(c), first = plan.charts[0];
@@ -427,6 +433,8 @@
         <tr><td>Rows · columns · nonzeros</td><td>${num(s.rows, 12)} · ${num(s.cols, 12)} · ${num(s.nnz, 12)}</td></tr>
         <tr><td>Simplex iterations · nodes</td><td>${num(s.simplex_iterations ?? 0, 12)} · ${num(s.nodes ?? 0, 12)}</td></tr>
         ${s.barrier_iterations ? `<tr><td>${c.options.lpMethod === "pdlp" || gpuUse(c)[0] ? "PDLP" : "Interior-point"} iterations</td><td>${num(s.barrier_iterations, 12)}</td></tr>` : ""}
+        ${s.class === "QCP" || s.slp_iterations ? `<tr><td>SLP iterations</td><td>${num(s.slp_iterations, 12)}</td></tr>` : ""}
+        ${s.class === "QCP" && s.max_nonlinear_violation != null ? `<tr><td>Largest quadratic-row violation (relative)</td><td>${num(s.max_nonlinear_violation)}</td></tr>` : ""}
         <tr><td>Computed on</td><td>${esc(gpuUse(c)[1])}</td></tr>
         ${settingsRows(c.options).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join("")}</tbody></table>`;
     return verdict(c) + `<div class="grid2">${panel("Verification", checkTable(checks(c).own.concat(checks(c).ind)) +
@@ -439,7 +447,7 @@
     return verdict(c) + `<div class="grid2">${panel("samaya’s built-in verifier", checkTable(own) +
         `<div class="note">Recorded by samaya before it reported the answer (its --json run summary).</div>`)}
       ${panel("Independent re-check by samaya Studio", (ind.length ? checkTable(ind) : `<div class="panel-body muted">No solution to re-check for this status.</div>`) +
-        `<div class="note">Recomputed here from the model file and the solution alone, with separate code.${k && k.rowName ? ` Worst row: ${esc(k.rowName)}.` : ""}</div>`)}</div>`;
+        `<div class="note">Recomputed here from the model file and the solution alone, with separate code.${c.result.summary?.class === "QCP" ? " Quadratic-row checks are unavailable in Studio; the rows are checked by the samaya verifier." : ""}${c.result.summary?.class !== "QCP" && k && k.rowName ? ` Worst row: ${esc(k.rowName)}.` : ""}</div>`)}</div>`;
   }
   function solutionTab(c) {
     const R = c.result, q = state.filter.toLowerCase(), LIMIT = 2000;
@@ -452,7 +460,7 @@
       <div class="grid2" style="margin-top:0">${panel(`Variables (${num(cols.length, 12)} nonzero${q ? ", matching" : ""})`,
         `<div class="scroll"><table><thead><tr><th>Column</th><th class="num">Value</th></tr></thead><tbody>${t1}</tbody></table></div>${more(cols.length)}`)}
       ${panel(`Constraints (${num(rows.length, 12)}${q ? ", matching" : ""})`,
-        `<div class="scroll"><table><thead><tr><th>Row</th><th class="num">Activity</th><th class="num">Dual</th></tr></thead><tbody>${t2}</tbody></table></div>${more(rows.length)}`)}</div>
+        `<div class="scroll"><table><thead><tr><th>Row</th><th class="num">Activity</th><th class="num">${R.summary?.class === "QCP" ? "Local marginal value" : "Dual"}</th></tr></thead><tbody>${t2}</tbody></table></div>${more(rows.length)}`)}</div>
       ${R.truncated ? `<div class="note">This model is large: Studio shows part of the solution; the solution file has every value.</div>` : ""}`;
   }
 
@@ -559,7 +567,7 @@
       const top = cols.filter(([, v]) => Math.abs(v) > 1e-9).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 15);
       if (top.length) charts.push(["Largest variable values", Charts.hbars(top, String, "")]);
       const duals = (R.rowsData || []).filter(([, , d]) => Math.abs(d) > 1e-9).sort((a, b) => Math.abs(b[2]) - Math.abs(a[2])).slice(0, 12).map(([k, , d]) => [k, d]);
-      if (duals.length) charts.push(["Largest duals (shadow prices)", Charts.hbars(duals, String, "")]);
+      if (duals.length) charts.push([R.summary?.class === "QCP" ? "Largest local marginal values (KKT multipliers)" : "Largest duals (shadow prices)", Charts.hbars(duals, String, "")]);
     }
     c._plan = { key: c.options.startDate, charts, tables, time };
     return c._plan;
@@ -591,6 +599,11 @@
     line("Best bound", (c) => c.result.summary.dual_bound ?? "");
     line("Solve time (s)", (c) => Math.round((c.result.summary.solve_seconds ?? 0) * 1000) / 1000);
     line("Simplex iterations", (c) => c.result.summary.simplex_iterations ?? 0);
+    if (list.some((c) => c.result.summary.class === "QCP")) {
+      line("SLP iterations", (c) => c.result.summary.slp_iterations ?? "");
+      line("Largest quadratic-row violation (relative)", (c) => c.result.summary.max_nonlinear_violation ?? "");
+      line("Status explanation", (c) => c.result.summary.status === "first_order_stationary" ? "Feasible point where the first-order (KKT) conditions hold; local optimality is not certified" : "");
+    }
     line("Interior-point or PDLP iterations", (c) => c.result.summary.barrier_iterations ?? 0);
     line("Branch-and-bound nodes", (c) => c.result.summary.nodes ?? 0);
     line("Computed on", (c) => gpuUse(c)[1]);
@@ -635,13 +648,15 @@
       ["Horizon", span ? `${span[0]} (${span[1]})` : ""],
       ["Solve time (s)", s.solve_seconds ?? ""], ["Rows", s.rows], ["Columns", s.cols], ["Nonzeros", s.nnz], ["Integer columns", s.integers ?? 0],
       ["Simplex iterations", s.simplex_iterations ?? 0], ["Branch-and-bound nodes", s.nodes ?? 0],
+      ...(s.class === "QCP" || s.slp_iterations ? [["SLP iterations", s.slp_iterations ?? ""], ["Largest quadratic-row violation (relative)", s.max_nonlinear_violation ?? ""]] : []),
+      ...(s.status === "first_order_stationary" ? [["Status explanation", "Feasible point where the first-order (KKT) conditions hold; local optimality is not certified"]] : []),
       ...settingsRows(c.options), ["Computed on", gpuUse(c)[1]], ["Exported", { dateTime: new Date() }]]]];
     out.push(["Verification", [["Check", "Checked by", "Largest error", "Tolerance", "Passed"],
       ...own.map(([n, v, t]) => [n, "samaya verifier", v, t, v <= t ? "yes" : "no"]),
       ...ind.map(([n, v, t]) => [n, "samaya Studio re-check (from the model file)", v, t, v <= t ? "yes" : "no"])]]);
     for (const t of plan.tables) out.push([t.title, t.note ? t.rows.concat([[t.note]]) : t.rows]);
     out.push(["Variables", [["Column", "Value"], ...(R.cols || []).map((r) => r.slice(0, 2))]]);
-    out.push(["Constraints", [["Row", "Activity", "Dual"], ...(R.rowsData || []).map((r) => r.slice(0, 3))]]);
+    out.push(["Constraints", [["Row", "Activity", s.class === "QCP" ? "Local marginal value" : "Dual"], ...(R.rowsData || []).map((r) => r.slice(0, 3))]]);
     const sensitivity = Xlsx.sensitivitySheet(R);
     if (sensitivity) out.push(sensitivity);
     out.push(["Solver log", [["samaya output"], ...String(R.log || "").split("\n").map((l) => [l])]]);
@@ -769,7 +784,7 @@
   // ---------------------------------------------------------------------------------------------
   // Mock host (plain browser): replays a recorded solve of the crude scheduling case.
   function mockHost(msg) {
-    let M = msg.path?.includes("sensitivity_lp") ? window.SAMAYA_RANGING_MOCK : window.SAMAYA_MOCK;
+    let M = msg.path?.includes("pooling") ? window.SAMAYA_POOLING_MOCK : msg.path?.includes("sensitivity_lp") ? window.SAMAYA_RANGING_MOCK : window.SAMAYA_MOCK;
     if (msg.type === "solve") {
       M = Object.assign({}, M);
       M.ranging = msg.options.ranging ? M.ranging || { available: false, message: "Sensitivity ranging is only available for LPs." } : null;
@@ -826,7 +841,7 @@
     setTimeout(() => {
       if (demo.get("start")) $("#opt-start").value = demo.get("start");
       if (demo.has("ranging")) $("#opt-ranging").checked = true;
-      addCases(demo.has("ranging") ? [{ name: "sensitivity_lp.mps", path: window.SAMAYA_RANGING_MOCK.path }]
+      addCases(demo.has("pooling") ? [{ name: "pooling.mps", path: window.SAMAYA_POOLING_MOCK.path }] : demo.has("ranging") ? [{ name: "sensitivity_lp.mps", path: window.SAMAYA_RANGING_MOCK.path }]
         : [{ name: "mrpl_crude_small.mps", path: window.SAMAYA_MOCK.path }]);
       if (demo.get("tab")) window.studio.select(demo.get("tab"));
       if (demo.has("back")) window.studio.back();

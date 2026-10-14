@@ -11,7 +11,7 @@ Flows are nonnegative; pool qualities lie between component quality extremes.
 
 QCMATRIX contains the full symmetric matrix for x'Qx, without a factor 1/2.
 Generated data are built around positive pool flows; the known feasible point
-is saved as <name>.start.json beside the MPS. Figures are synthetic, not MRPL data.
+is saved as <name>.start.json and <name>.start.sol beside the MPS. Figures are synthetic, not MRPL data.
 
 Usage:
   python cases/pooling.py --components 4 --pools 2 --products 3 --seed 26119 --out blend.mps
@@ -186,6 +186,9 @@ def main() -> None:
         model.write(path)
         path.with_suffix(".start.json").write_text(json.dumps(start, indent=2) + "\n",
                                                   encoding="utf-8")
+        lines = [f"columns {len(start)}", "# name value"]
+        lines.extend(f"{name} {value:.17g}" for name, value in start.items())
+        path.with_suffix(".start.sol").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"wrote {path}")
 
 

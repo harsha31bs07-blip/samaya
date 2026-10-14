@@ -55,3 +55,14 @@ for family in plan crude utility; do
   fi
   printf '\nsolved in %.2f s\n\n' "$(echo "${end} - ${start}" | bc)"
 done
+
+# Nonconvex blending: the answer is stationary (KKT), with local optimality uncertified.
+model="${out}/pooling.mps"
+python3 cases/pooling.py --components 4 --pools 2 --products 3 --seed 26119 --out "${model}"
+"${samaya}" --time-limit 60 --json --mip-start "${out}/pooling.start.sol" \
+  --solution "${out}/pooling.sol" "${model}" > "${out}/pooling.log"
+cat "${out}/pooling.log"
+if [[ -n "${output}" ]]; then
+  python3 cases/report.py "${model}" "${out}/pooling.sol" \
+    --run "${out}/pooling.log" --format "${output}"
+fi

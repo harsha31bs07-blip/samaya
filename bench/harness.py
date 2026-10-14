@@ -25,7 +25,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_SAMAYA = REPO / "build" / "release" / "apps" / "cli" / "samaya"
-SOLVED = {"optimal", "infeasible", "unbounded"}
+SOLVED = {"optimal", "first_order_stationary", "infeasible", "unbounded"}
 
 
 def run_samaya(exe: Path, instance: Path, time_limit: float, threads: int, gap: float) -> dict:

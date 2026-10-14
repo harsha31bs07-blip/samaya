@@ -61,6 +61,8 @@ class Mps:
         self.ranges: dict[str, float] = {}
         self.lo: dict[str, float] = {}
         self.up: dict[str, float] = {}
+        self.row_quadratic: dict[str, list[tuple[str, str, float]]] = {}
+        quadratic_row = None
         section, intmode = None, False
         for raw in path.read_text().splitlines():
             if not raw.strip() or raw.startswith("*"):
@@ -70,6 +72,9 @@ class Mps:
                 section = tok[0]
                 if section == "NAME" and len(tok) > 1:
                     self.name = tok[1]
+                if section == "QCMATRIX":
+                    quadratic_row = tok[1]
+                    self.row_quadratic.setdefault(quadratic_row, [])
                 if section == "OBJSENSE" and len(tok) > 1:
                     self.sense = tok[1]
                 continue
@@ -93,6 +98,8 @@ class Mps:
                 target = self.rhs if section == "RHS" else self.ranges
                 for k in range(0, len(pairs) - 1, 2):
                     target[pairs[k]] = float(pairs[k + 1])
+            elif section == "QCMATRIX":
+                self.row_quadratic[quadratic_row].append((tok[0], tok[1], float(tok[2])))
             elif section == "BOUNDS":
                 kind, col = tok[0], tok[2]
                 val = float(tok[3]) if len(tok) > 3 else None
@@ -138,6 +145,11 @@ def recheck(model: Mps, x: dict[str, float]) -> dict:
         for r, a in entries.items():
             act[r] += a * v
             mag[r] = max(mag[r], abs(a * v))
+    for row, terms in model.row_quadratic.items():
+        # QCMATRIX stores the full matrix for x'Qx, including both off-diagonal entries.
+        values = [a * x.get(c1, 0.0) * x.get(c2, 0.0) for c1, c2, a in terms]
+        act[row] = math.fsum([act[row], *values])
+        mag[row] = max([mag[row], *(abs(v) for v in values)])
     worst_row, worst_row_name = 0.0, ""
     for r, t in model.row_type.items():
         if t == "N":
@@ -484,6 +496,7 @@ def build(model_path: Path, sol_path: Path, run_path: Path | None) -> dict:
     reported = float(header.get("objective", "nan"))
     obj_diff = abs(chk["objective"] - reported) / (1 + abs(reported)) if math.isfinite(reported) else float("nan")
     bound = summary.get("dual_bound")
+    bound = bound if isinstance(bound, (int, float)) and math.isfinite(bound) else None
     gap = (abs(reported - bound) / max(1e-9, abs(reported))) if bound is not None and math.isfinite(reported) else None
     status = header.get("status", summary.get("status", "unknown"))
     verified = header.get("verified", "yes" if summary.get("verified") else "no") in ("yes", "true", "True")
@@ -491,7 +504,8 @@ def build(model_path: Path, sol_path: Path, run_path: Path | None) -> dict:
     if summary:
         checks_samaya = [
                 ("Primal feasibility (rows and bounds)", summary.get("max_primal_violation", float("nan")), kPrimalTol),
-                ("Dual feasibility (LP certificate)" if model.integer == set() else "Dual feasibility (final LP)",
+                ("First-order (KKT) conditions" if model.row_quadratic else
+                 "Dual feasibility (LP certificate)" if model.integer == set() else "Dual feasibility (final LP)",
                   summary.get("max_dual_violation", float("nan")), kDualTol)]
     checks_own = [("Rows: worst relative violation", chk["row"], kPrimalTol),
                                 ("Bounds: worst relative violation", chk["bound"], kPrimalTol),
@@ -503,6 +517,9 @@ def build(model_path: Path, sol_path: Path, run_path: Path | None) -> dict:
             "model": model.name, "file": model_path.name, "sense": "maximize" if model.sense.upper().startswith("MAX") else "minimize",
             "status": status, "verified": verified, "objective": reported, "bound": bound, "gap": gap,
             "solve_seconds": summary.get("solve_seconds"), "read_seconds": summary.get("read_seconds"),
+            "slp_iterations": summary.get("slp_iterations"),
+            "max_nonlinear_violation": summary.get("max_nonlinear_violation"),
+            "qcp": bool(model.row_quadratic),
             "iterations": summary.get("simplex_iterations"), "nodes": summary.get("nodes"),
             "rows": chk["rows"], "cols": chk["cols"], "integers": chk["integers"],
             "generated": dt.datetime.now().strftime("%d %b %Y, %H:%M"),
@@ -514,6 +531,11 @@ def build(model_path: Path, sol_path: Path, run_path: Path | None) -> dict:
                                     ["Rows", info["rows"]], ["Columns", info["cols"]], ["Integer columns", info["integers"]],
                                     ["Simplex iterations", info["iterations"] or ""], ["Branch-and-bound nodes", info["nodes"] or ""],
                                     ["Report generated", info["generated"]]]
+    if info["qcp"] or info["slp_iterations"]:
+        summary_rows.extend([["SLP iterations", info["slp_iterations"]],
+                             ["Largest quadratic-row violation (relative)", info["max_nonlinear_violation"]]])
+    if status == "first_order_stationary":
+        summary_rows.append(["Status explanation", "Feasible point where the first-order (KKT) conditions hold; local optimality is not certified"])
     verify_rows = [["Check", "Checked by", "Largest error", "Tolerance", "Passed"]]
     for name, v, tol in checks_samaya:
         verify_rows.append([name, "samaya verifier", v, tol, "yes" if v <= tol else "no"])
@@ -524,7 +546,7 @@ def build(model_path: Path, sol_path: Path, run_path: Path | None) -> dict:
         rows = [t.header] + t.rows + ([[t.note]] if t.note else [])
         sheets.append((t.title, rows))
     sheets.append(("Variables", [["Column", "Value"]] + variables))
-    sheets.append(("Constraints", [["Row", "Activity", "Dual"]] + constraints))
+    sheets.append(("Constraints", [["Row", "Activity", "Local marginal value" if info["qcp"] else "Dual"]] + constraints))
     sensitivity = []
     ranging = details["ranging"]
     if ranging and ranging["available"]:
@@ -577,6 +599,7 @@ h2{color:var(--navy);font-size:20px;margin:30px 0 12px}
 .hero{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:6px}
 .hero h1{font-size:24px;margin:0 12px 0 0}
 .pill{border-radius:999px;padding:4px 14px;font-weight:600;font-size:13px}
+.info{background:#E8EEF7;color:var(--navy)}
 .ok{background:var(--lgreen);color:var(--green)}.bad{background:#FBE3E3;color:var(--red)}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px}
 .card{background:var(--card);border-radius:14px;box-shadow:0 2px 10px rgba(27,58,107,.07);padding:16px 18px}
@@ -629,8 +652,14 @@ def _data_uri(mime: str, data: bytes) -> str:
 
 def render_html(rep: dict, xlsx: bytes, stem: str) -> str:
     i = rep["info"]
-    ok = i["verified"] and i["status"] == "optimal"
-    pills = (f'<span class="pill {"ok" if i["status"] == "optimal" else "bad"}">{html.escape(i["status"]).upper()}</span>'
+    stationary = i["status"] == "first_order_stationary"
+    explanation = "Feasible point where the first-order (KKT) conditions hold; local optimality is not certified"
+    status_style = "ok" if i["status"] == "optimal" else "info" if stationary and i["verified"] else "bad"
+    note = ("The answer is a verified first-order stationary point (local optimality not certified) and passed every check below."
+            if stationary and i["verified"] and all(v <= tol for _, v, tol in rep["checks_samaya"] + rep["checks_own"])
+            else "The answer is optimal and passed every check below." if i["verified"] and i["status"] == "optimal"
+            else "The answer did not pass every check; see below.")
+    pills = (f'<span class="pill {status_style}">{html.escape(i["status"]).upper()}</span>'
                       f'<span class="pill {"ok" if i["verified"] else "bad"}">{"✓ VERIFIED" if i["verified"] else "NOT VERIFIED"}</span>')
     kpis = [("Objective (" + i["sense"] + ")", _num(i["objective"], 10)),
                     ("Best bound · gap", (_num(i["bound"], 10) + " · " + (f"{i['gap']:.2%}" if i["gap"] is not None else "–"))
@@ -639,6 +668,9 @@ def render_html(rep: dict, xlsx: bytes, stem: str) -> str:
                     ("Model size", f"{i['rows']:,} rows · {i['cols']:,} cols"),
                     ("Integer decisions", f"{i['integers']:,}"),
                     ("Iterations · nodes", f"{_num(i['iterations'])} · {_num(i['nodes'])}")]
+    if i["qcp"] or i["slp_iterations"]:
+        kpis.extend([("SLP iterations", _num(i["slp_iterations"])),
+                     ("Largest quadratic-row violation (relative)", _num(i["max_nonlinear_violation"]))])
     kpi_html = "".join(f'<div class="card kpi"><div class="l">{html.escape(l)}</div><div class="v">{v}</div></div>'
                                           for l, v in kpis)
 
@@ -675,7 +707,7 @@ def render_html(rep: dict, xlsx: bytes, stem: str) -> str:
         downloads.append(f'<a class="btn alt" download="{html.escape(stem)}_{html.escape(name.lower().replace(" ", "_"))}.csv" '
                                           f'href="{_data_uri("text/csv", csv_text(rows).encode())}">{html.escape(name)} (CSV)</a>')
     var_t = Table("Variables", ["Column", "Value"], rep["variables"])
-    con_t = Table("Constraints", ["Row", "Activity", "Dual"], rep["constraints"])
+    con_t = Table("Constraints", ["Row", "Activity", "Local marginal value" if i["qcp"] else "Dual"], rep["constraints"])
     log = f'<pre class="log">{html.escape(rep["log"])}</pre>' if rep["log"] else '<div class="note">No run log given (--run).</div>'
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -683,7 +715,8 @@ def render_html(rep: dict, xlsx: bytes, stem: str) -> str:
 <header><div class="brand">samaya</div><div class="sub">Run report</div><div class="when">{html.escape(i["generated"])}</div></header>
 <main>
 <div class="hero"><h1>{html.escape(i["model"])}</h1>{pills}</div>
-<div class="note">{"The answer is optimal and passed every check below." if ok else "The answer did not pass every check; see below."}</div>
+<div class="note">{note}</div>
+<div class="note">{explanation if stationary else ""}</div>
 <h2>Summary</h2><div class="grid">{kpi_html}</div>
 <h2>Verification</h2>{verify}
 {"<h2>Plan</h2>" + charts + tables if charts or tables else ""}

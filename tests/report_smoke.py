@@ -88,11 +88,52 @@ def check_ranging(samaya: Path, src: Path, work: Path) -> None:
     print("ranging report formats and backward compatibility passed")
 
 
+def check_qcp(samaya: Path, src: Path, work: Path) -> None:
+    sys.path.insert(0, str(src / "cases"))
+    from report import build, recheck, Mps
+    from mrpl import read_solution
+
+    model = src / "tests" / "instances" / "haverly3.mps"
+    sol, log = work / "haverly3.sol", work / "haverly3.log"
+    output = subprocess.run([str(samaya), "--json", "--solution", str(sol), str(model)],
+                            check=True, capture_output=True, text=True).stdout
+    log.write_text(output, encoding="utf-8")
+    summary = json.loads(output.splitlines()[-1])
+    assert summary["status"] == "first_order_stationary" and summary["verified"]
+    assert summary["class"] == "QCP" and summary["dual_bound"] is None
+    assert summary["slp_iterations"] > 0 and summary["max_nonlinear_violation"] <= 1e-6
+    assert sol.read_text().splitlines()[0] == "status first_order_stationary"
+    rep = build(model, sol, log)
+    assert all(v <= tol for _, v, tol in rep["checks_samaya"] + rep["checks_own"])
+    assert rep["info"]["gap"] is None
+    # Dropping quadratic activities or accepting a corrupted quality must fail this check.
+    _, x, _ = read_solution(sol)
+    x["p"] += 0.1
+    assert recheck(Mps(model), x)["row"] > 1e-6
+    note = "The answer is a verified first-order stationary point (local optimality not certified) and passed every check below."
+    for fmt, target in (("html", work / "haverly3.html"), ("excel", work / "haverly3.xlsx")):
+        subprocess.run([sys.executable, str(src / "cases" / "report.py"), str(model), str(sol),
+                        "--run", str(log), "--format", fmt, "--out", str(target)], check=True)
+    page = (work / "haverly3.html").read_text(encoding="utf-8")
+    assert '<span class="pill info">FIRST_ORDER_STATIONARY</span>' in page
+    assert note in page and "local optimality is not certified" in page
+    assert "The answer is optimal" not in page and 'class="cross"' not in page
+    assert "SLP iterations" in page and "Largest quadratic-row violation (relative)" in page
+    assert "Local marginal value" in page
+    with zipfile.ZipFile(work / "haverly3.xlsx") as z:
+        assert z.testzip() is None
+        sheet = z.read("xl/worksheets/sheet1.xml").decode()
+        assert "SLP iterations" in sheet and "Largest quadratic-row violation (relative)" in sheet
+        assert "local optimality is not certified" in sheet
+    print("QCP stationary report formats and quadratic re-check passed")
+
+
 def main() -> int:
     samaya, src, work = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
     work.mkdir(parents=True, exist_ok=True)
     py = sys.executable
     check_ranging(samaya, src, work)
+    check_qcp(samaya, src, work)
     subprocess.run([py, str(src / "cases" / "mrpl.py"), "generate", "--out", str(work)],
                    check=True, stdout=subprocess.DEVNULL)
     model = work / "mrpl_crude_small.mps"
