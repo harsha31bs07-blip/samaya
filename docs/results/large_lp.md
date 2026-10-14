@@ -45,11 +45,27 @@ clock factor 1.000 (`bench/clock_factor.py`).
   this is what WP6/W4 (hyper-sparse FTRAN/BTRAN, profile first) targets, and a better crossover
   basis would cut the iterations.
 - **No verified solve above 10⁶ columns yet.** The slides must not claim one.
-- **Next, without crossover:** PDLP on the GPU to its own tolerance 1e-8. On 8 October (before
-  the tiled SpMV, 2.26x fewer seconds per iteration since) the KKT error at the last restart was
-  4.7e-8 after 900 s. An answer at 1e-8 can pass the verifier (1e-6 relative) on its own, which
-  would give a verified interior solution above 10⁶ columns. Queued after the overnight
-  attribution runs, at 3,600 s; then the barrier (AMD ordering, b212d4c) on the same LP.
+
+## GPU PDLP to 1e-8, without crossover (13 October 2026)
+
+`samaya --lp-method pdlp --gpu --time-limit 3600 --log-level 1`, build f377d79, alone on the
+laptop, clock factor 1.000.
+
+| Phase | Outcome |
+|---|---|
+| PDLP on the GPU, tolerance 1e-8 | stopped by its **automatic iteration cap of 1,000,000**, not by the tolerance or the time limit |
+| Fallback: dual simplex from scratch (presolve removed nothing) | 86,400 iterations, then the time limit |
+| Total | time limit at 3,601.0 s, no verified answer; peak memory 1.04 GB |
+
+- **The run measured the cap, not PDLP.** `pdlp.cpp` capped automatic iterations at
+  min(1000·(m + n), 10⁶) even when a time limit was given; at about 400 iterations per second
+  that cap ends PDLP well inside the hour. The level-1 log did not say when, so the split
+  between PDLP and the simplex is unknown. Fixed afterwards: with a time limit the 10⁶ ceiling
+  no longer applies (the size-proportional cap, 1.5·10⁹ here, still does), and the level-1
+  lines for the iteration and time limits give the elapsed time and the KKT error at the last
+  restart.
+- **Next:** the same run again with the fix, to learn whether 1e-8 is reachable within the hour.
+  Then the barrier (AMD ordering, b212d4c) on the same LP.
 
 ## Still to run
 

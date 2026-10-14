@@ -364,8 +364,12 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
 
   long long max_iter = options.max_iterations;
   if (max_iter <= 0) {
-    // Default: proportional to problem size, minimum 10000
-    max_iter = std::max<long long>(10000LL, std::min<long long>(10000LL * (m + n) / 10, 1000000LL));
+    // Default: proportional to problem size, minimum 10000. The ceiling of 1e6 applies only
+    // without a time limit: on the 1e6-column refinery LP the GPU makes 1e6 iterations well
+    // inside an hour, and the ceiling stopped PDLP short of its tolerance and of the limit the
+    // user gave (docs/results/large_lp.md, 13 October).
+    max_iter = std::max<long long>(10000LL, 10000LL * (m + n) / 10);
+    if (options.time_limit >= kInf) max_iter = std::min<long long>(max_iter, 1000000LL);
   }
 
   // Largest column norm of A and largest row norm (column of At), for the relative residuals;
@@ -535,6 +539,8 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
     if (options.time_limit < kInf && timer.seconds() > options.time_limit) {
       result.status = SimplexStatus::kTimeLimit;
       result.iterations = iter;
+      log.log(1, "pdlp: time limit after %lld iterations, %.1f s, KKT at the last restart %.2e",
+              iter, timer.seconds(), kkt_at_restart);
       break;
     }
 
@@ -1141,7 +1147,8 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
   if (result.status == SimplexStatus::kNumericalError) {
     result.status = SimplexStatus::kIterationLimit;
     result.iterations = max_iter;
-    log.log(1, "pdlp: iteration limit reached (%lld)", max_iter);
+    log.log(1, "pdlp: iteration limit reached (%lld) after %.1f s, KKT at the last restart %.2e",
+            max_iter, timer.seconds(), kkt_at_restart);
   }
 
   // --- Map solution back to original scaling ---
