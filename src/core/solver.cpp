@@ -111,26 +111,37 @@ namespace {
 // (and leaves `lp` unspecified) when the caller should solve the original model instead: the
 // reduced model was not solved to a verified optimum, or presolve found infeasibility (the
 // original solve then produces a certificate for the original model).
+// The per-rule counters of a presolve run, at log level 2 (parsed by bench/presolve_compare.py).
+void log_presolve_stats(const Logger& log, const PresolveStats& st) {
+  log.log(2,
+          "Presolve: rows: %d empty, %d singleton, %d forcing, %d redundant, %d duplicate; "
+          "cols: %d fixed, %d empty, %d dominated, %d free singleton; %d bounds tightened; "
+          "implied_free_col_singletons %d; implied_free_rejected_by_tolerance %d",
+          st.empty_rows, st.singleton_rows, st.forcing_rows, st.redundant_rows,
+          st.duplicate_rows, st.fixed_cols, st.empty_cols, st.dominated_cols,
+          st.free_col_singletons, st.bounds_tightened, st.implied_free_col_singletons,
+          st.implied_free_rejected_by_tolerance);
+}
+
 bool solve_presolved_lp(const Model& model, const Params& requested, const Logger& log,
                         Result& result, LpResult& lp, long long& iterations) {
   const Timer timer;
   Params params = requested;
   Presolve presolve(model);
   if (presolve.run() != PresolveStatus::kReduced) {
-    log.log(1, "Presolve: infeasibility detected; solving the original model for a certificate");
+    log.log(1, "Presolve: infeasibility detected; solving the original model for a certificate; "
+            "presolve_seconds %.9g; passes %d", timer.seconds(), presolve.stats().passes);
+    log_presolve_stats(log, presolve.stats());
     return false;
   }
   const Model& reduced = presolve.reduced();
   const PresolveStats& st = presolve.stats();
-  log.log(1, "Presolve: %d rows, %d cols -> %d rows, %d cols, %lld nonzeros (%d passes)",
+  log.log(1, "Presolve: %d rows, %d cols -> %d rows, %d cols, %lld nonzeros (%d passes); "
+          "original_nonzeros %lld; presolve_seconds %.9g",
           model.num_rows(), model.num_cols(), reduced.num_rows(), reduced.num_cols(),
-          static_cast<long long>(reduced.A.nnz()), st.passes);
-  log.log(2,
-          "Presolve: rows: %d empty, %d singleton, %d forcing, %d redundant, %d duplicate; "
-          "cols: %d fixed, %d empty, %d dominated, %d free singleton; %d bounds tightened",
-          st.empty_rows, st.singleton_rows, st.forcing_rows, st.redundant_rows,
-          st.duplicate_rows, st.fixed_cols, st.empty_cols, st.dominated_cols,
-          st.free_col_singletons, st.bounds_tightened);
+          static_cast<long long>(reduced.A.nnz()), st.passes,
+          static_cast<long long>(model.A.nnz()), timer.seconds());
+  log_presolve_stats(log, st);
 
   LpResult reduced_lp;
   if (reduced.num_cols() > 0) {
@@ -551,13 +562,18 @@ void solve_mip_model(const Model& model, const Params& params, const Logger& log
     if (presolve.run() == PresolveStatus::kInfeasible) {
       result.status = Status::kInfeasible;
       result.message = "presolve proved infeasibility";
-      log.log(1, "Presolve: infeasible");
+      log.log(1, "Presolve: infeasible; presolve_seconds %.9g; passes %d",
+              timer.seconds(), presolve.stats().passes);
+      log_presolve_stats(log, presolve.stats());
       return;
     }
     const Model& reduced = presolve.reduced();
-    log.log(1, "Presolve: %d rows, %d cols (%d integer) -> %d rows, %d cols (%d integer)",
+    log.log(1, "Presolve: %d rows, %d cols (%d integer) -> %d rows, %d cols (%d integer); "
+            "nonzeros %lld -> %lld; passes %d; presolve_seconds %.9g",
             model.num_rows(), model.num_cols(), model.num_integers(), reduced.num_rows(),
-            reduced.num_cols(), reduced.num_integers());
+            reduced.num_cols(), reduced.num_integers(), static_cast<long long>(model.A.nnz()),
+            static_cast<long long>(reduced.A.nnz()), presolve.stats().passes, timer.seconds());
+    log_presolve_stats(log, presolve.stats());
   }
   const Model& work = params.presolve ? presolve.reduced() : model;
 
