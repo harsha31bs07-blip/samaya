@@ -45,6 +45,79 @@ Their common scale is attempts/samples, capped to the wall-time budget excluding
 sampled seconds are also returned in `SimplexStats::sampled_seconds`. C++ callers can set
 `SimplexOptions::timing_sample_interval = 1` for a full trace, or a larger stride to lower overhead.
 
+### Step 0 results (14 October 2026, WSL on the laptop, alone on the machine)
+
+Build d86b0fa; clock factor 1.016 (the WSL clock ran 1.6% fast against the Windows clock, so
+seconds below are 1.6% high; ratios are unaffected). Raw data:
+`bench/results/step0/20261014-0415-d86b0fa/`.
+
+**Overhead gate: passed.** All 93 Netlib models, dual simplex, the instrumented release binary
+against the uninstrumented 905c1a5 build, alternating, best of 2 rounds: geomean new/base
+**1.0036** over the 27 models with base time ≥ 0.05 s (gate ≤ 1.03); the worst ratio is 1.052
+(fit1p, 0.06 s). Iteration counts and objectives are identical on all 93; all optimal.
+
+**Large LP, crossover** (`--lp-method pdlp --gpu --crossover --time-limit 600`, cuda build):
+16,384 dual phase-2 iterations in 581 s, **35.4 ms per iteration**, no answer within 600 s.
+
+| Component | Share | ms/iter |
+|---|---:|---:|
+| rebuild + recompute | **37.2%** | 13.18 |
+| CHUZR | **14.9%** | 5.27 |
+| BTRAN | 11.1% | 3.93 |
+| entering-column FTRAN | 10.1% | 3.58 |
+| DSE FTRAN (tau) | 9.7% | 3.44 |
+| Forrest-Tomlin update | 6.0% | 2.11 |
+| primal update | 4.3% | 1.54 |
+| DSE weight update | 3.2% | 1.12 |
+| pivot row | 1.8% | 0.65 |
+| ratio test, bound flips, dual update, rest | 2.1% | 0.63 |
+
+- 164 rebuilds, 163 of them for the 100-iteration interval, each about 1.26 s of factorization
+  (L ≈ 0.33M, U ≈ 1.24M stored entries).
+- Densities are low: rho 1.7%, alpha_col 1.5%, tau 2.5% of m on average.
+- **110,681 rank repairs at the warm start**: almost a quarter of the 467,376 basic positions
+  of the crossover basis were replaced by logicals.
+- Ratio test: 4,867 candidates per iteration on average, 1.55 Harris groups.
+
+**Netlib** (93 models, dual simplex, 41.3 profiled seconds; dfl001 alone is 20.7 s and pilot87
+7.9 s):
+
+| Component | Share |
+|---|---:|
+| pivot row | **19.5%** |
+| ratio test | **14.5%** |
+| rebuild + recompute | 14.3% |
+| DSE FTRAN (tau) | 13.4% |
+| entering-column FTRAN | 10.9% |
+| BTRAN | 6.5% |
+| dual/reduced-cost update | 6.1% |
+| Forrest-Tomlin update | 4.7% |
+| CHUZR | 3.3% |
+| DSE weight update | 3.2% |
+| bound-flip FTRAN, primal update, rest | 3.7% |
+
+- Median densities: rho 1.2%, alpha_col 1.3%, tau 2.8% of m.
+- Rebuild reasons: 1,092 interval, 118 fill limit, 152 phase, 9 confirmation; no numerical or
+  mismatch rebuilds.
+- Harris groups average about 1 (dfl001: 22,703 groups in 22,696 iterations): the quadratic
+  rescan of step 5 does not occur. The ratio test costs time because the candidate lists are
+  long (dfl001 2,285, pilot87 1,279 per iteration), not because of the group scan.
+
+**What the table changes.**
+- Large LP: step 2 comes first. The interval rebuilds are 37% of the time, and a work-based
+  policy is the cheapest change in the plan. The factorization itself (1.26 s for this basis)
+  is a separate question for step 3.
+- Step 1 matters for the large LP (CHUZR 15%). On Netlib its share is small. There the pivot
+  row (19.5%) leads: computing rho^T A_N row-wise over rho's nonzeros, with a row-wise copy of
+  A (HiGHS's PRICE by row), joins step 1.
+- Step 3: FTRAN and BTRAN together take 31% of the large LP and 31% of Netlib, at densities
+  around 2%, so hyper-sparse solves are worth building.
+- Step 6 is likely the largest lever for the hour: the crossover basis needs 110,681 repairs. At
+  35 ms per iteration an hour is about 100,000 iterations. Even a 3x faster iteration does not
+  finish if the repaired basis needs millions.
+- Step 5 as written is dropped. A cheaper ratio test means shorter candidate lists (HiGHS's
+  BFRT works on a pre-filtered list), which can be done later.
+
 ## 1. Indexed vectors through the iteration (2–4 days; est. 1.3–2.5x here, 1.0–1.3x Netlib)
 
 Today: CHUZR scans all m basics (`simplex.cpp:312`), the BTRAN right-hand side and the entering
@@ -97,8 +170,8 @@ later. How many of the 86,912 iterations were repair is unknown until step 0.
 
 ## Order
 
-Step 0 first, on the large LP and Netlib, alone on the machine. Then 1 and 2 (they are cheap and
-their value shows in step 0's table), then 3; 4–6 as the table says. Every step: the Netlib and
+Step 0 is done (results above). Then 2, then 1 with the row-wise pivot row, then 3. Step 6 can
+run alongside, since it touches `crossover.cpp`, not the iteration. Then 4; step 5 is dropped. Every step: the Netlib and
 random-family differential tests, the verifier unchanged, the four presets, a planted bug.
 Gate (from POST_SUBMISSION_PLAN W4): Netlib geomean from 0.37 s to 0.25 s or better with nothing
 lost, and the large-LP crossover finishing within the hour.

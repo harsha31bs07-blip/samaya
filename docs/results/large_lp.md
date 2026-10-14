@@ -67,6 +67,28 @@ laptop, clock factor 1.000.
 - **Next:** the same run again with the fix, to learn whether 1e-8 is reachable within the hour.
   Then the barrier (AMD ordering, b212d4c) on the same LP.
 
+## GPU PDLP to 1e-8, rerun after the cap fix (14 October 2026)
+
+`samaya --lp-method pdlp --gpu --time-limit 3600 --log-level 1`, build d86b0fa, alone on the
+laptop, clock factor 1.016 (WSL clock 1.6% fast). Raw data:
+`bench/results/large_lp/20261014-0434-d86b0fa-pdlp1e8/`.
+
+| Phase | Outcome |
+|---|---|
+| PDLP on the GPU, tolerance 1e-8 | 1,413,632 iterations (about 390 per second), then the **time limit**; not converged |
+| Total | time limit at 3,600.9 s, no verified answer; peak memory 0.70 GB |
+
+- **1e-8 is not reachable within the hour on this LP.** The weighted KKT error at the last
+  restart was 5.5e-9. That number weights the primal residual by the primal weight ω and the
+  dual one by 1/ω. The stopping test needs the relative primal residual, dual residual and gap
+  each below 1e-8 without weights, and it was not met. This log did not show the unweighted
+  values; the limit messages now print them from the last evaluation.
+- Peak memory dropped from 1.04 GB to 0.70 GB because no simplex fallback ran this time.
+- **Consequence:** PDLP alone does not give a verified solve above 10⁶ columns here. The path
+  goes through crossover, and so through the simplex speed work in `docs/SIMPLEX_SPEED_PLAN.md`
+  (its step 0 measured 35 ms per crossover iteration and 110,681 rank repairs of the crossover
+  basis).
+
 ## Still to run
 
 - The fixed Mittelmann subset (`bench/mittelmann_lp.test`): dual simplex, barrier, PDLP on the

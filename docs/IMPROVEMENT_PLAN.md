@@ -310,6 +310,31 @@ feasible. Aggregation can create such nearly parallel rows. Make the parallel te
 - columns and rows after presolve on all 62 instances against HiGHS (the script from the
   research, moved into `bench/presolve_compare.py`), and the skip counters;
 - then the bound A/B and MIPLIB at 60 s; no wrong answer anywhere.
+
+#### Measured after C1 and C2 (14 October 2026, d86b0fa plus the C2 log line)
+
+`bench/presolve_compare.py --jobs 1` against HiGHS 1.15.1 presolve on the 62 instances. All 62
+are paired. Raw data: `bench/results/step0/c2-counters/`.
+
+| | Rows | Columns | Nonzeros |
+|---|---:|---:|---:|
+| original | 90,412 | 104,740 | 446,650 |
+| samaya | 77,765 | 97,861 | 404,060 |
+| HiGHS | 71,620 | 91,995 | 380,321 |
+
+- Geomean of columns samaya/HiGHS: **1.063**. Presolve time over all 62: samaya 0.08 s,
+  HiGHS 2.88 s.
+- **C2 fires on 19 instances.** It removes 2,230 columns (1,147 continuous, 1,083 integer),
+  a third of samaya's 6,879 column reductions. It rejected only 2 substitutions (for the
+  residual) and none for pivot, divisibility, integer bound or crossed bounds.
+- beasleyC3 now matches HiGHS (1,704 columns, from 2,500), with 199 continuous doubletons.
+  milo-v12-6-r2-40-1 went from 2,688 to 2,473 columns (HiGHS 1,698).
+- C1 fires once; 186 candidates fail only the 1e-12 error allowance. Whether a looser but
+  still proven allowance is worth it can be decided after C3.
+- **Largest remaining gaps** (columns samaya/HiGHS): app1-1 2.34, milo-v12-6-r2-40-1 1.46,
+  b1c1s1 1.42, neos-2657525-crna 1.41, neos859080 1.33, fhnw-binpack4-4 1.24. C3 is
+  measured against these first.
+- Still to do for C2: the MIPLIB A/B at 60 s, and its LP dual postsolve.
 ### D. Clique table in propagation and probing (1.5 days)
 
 The conflict graph (`src/mip/cuts.cpp`) now feeds only the clique separator. The research found
