@@ -525,6 +525,20 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
     return std::sqrt(omega * omega * e.rel_primal * e.rel_primal +
                      e.rel_dual * e.rel_dual / (omega * omega) + e.rel_gap * e.rel_gap);
   };
+  // The termination test's distance: the largest of the three quantities it compares with tol.
+  // The weighted KKT error above can be below tol while this is not (omega != 1), so a limit
+  // reports both, from the better of the current and average iterates at the last evaluation.
+  const auto worst = [](const Measure& e) {
+    return std::max({e.rel_primal, e.rel_dual, std::fabs(e.rel_gap)});
+  };
+  Measure best_evaluated{kInf, kInf, kInf, kInf, 0.0, 0.0};
+  const auto log_limit = [&](const char* what, long long iterations) {
+    log.log(1,
+            "pdlp: %s after %lld iterations, %.1f s, KKT at the last restart %.2e; last "
+            "evaluation: primal %.2e, dual %.2e, gap %.2e (tolerance %.0e)",
+            what, iterations, timer.seconds(), kkt_at_restart, best_evaluated.rel_primal,
+            best_evaluated.rel_dual, best_evaluated.rel_gap, options.tol);
+  };
 
   log.log(3, "pdlp: after initialization, before main loop");
 
@@ -539,8 +553,7 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
     if (options.time_limit < kInf && timer.seconds() > options.time_limit) {
       result.status = SimplexStatus::kTimeLimit;
       result.iterations = iter;
-      log.log(1, "pdlp: time limit after %lld iterations, %.1f s, KKT at the last restart %.2e",
-              iter, timer.seconds(), kkt_at_restart);
+      log_limit("time limit", iter);
       break;
     }
 
@@ -663,6 +676,7 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
     const double rel_gap = current.rel_gap;
     const double gap = current.gap;
     (void)gap;
+    best_evaluated = worst(average) < worst(current) ? average : current;
 
     // Check convergence - early termination when all residuals are below tolerance
     // The gap must be small in magnitude: a negative gap (dual objective above the primal one)
@@ -1147,8 +1161,7 @@ PdlpResult solve_pdlp_once(const LpProblem& lp, const PdlpOptions& options, cons
   if (result.status == SimplexStatus::kNumericalError) {
     result.status = SimplexStatus::kIterationLimit;
     result.iterations = max_iter;
-    log.log(1, "pdlp: iteration limit reached (%lld) after %.1f s, KKT at the last restart %.2e",
-            max_iter, timer.seconds(), kkt_at_restart);
+    log_limit("iteration limit reached", max_iter);
   }
 
   // --- Map solution back to original scaling ---

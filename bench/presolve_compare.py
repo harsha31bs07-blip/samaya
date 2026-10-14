@@ -32,6 +32,12 @@ COUNTERS = ["passes", "rows_removed", "cols_removed", "empty_rows", "singleton_r
             "forcing_rows", "redundant_rows", "duplicate_rows", "fixed_cols", "empty_cols",
             "dominated_cols", "free_col_singletons", "bounds_tightened",
             "implied_free_col_singletons", "implied_free_rejected_by_tolerance"]
+DOUBLETON_COUNTERS = ["doubleton_continuous_cols", "doubleton_integer_cols",
+                      "doubleton_rejected_pivot", "doubleton_rejected_integer_data",
+                      "doubleton_rejected_divisibility", "doubleton_rejected_integer_bound",
+                      "doubleton_rejected_crossed_bounds", "doubleton_rejected_residual",
+                      "doubleton_rejected_nonfinite"]
+COUNTERS += DOUBLETON_COUNTERS
 SIZES = ["rows", "cols", "integers", "nonzeros"]
 FIELDS = (["instance"] + [f"original_{s}" for s in SIZES]
           + ["samaya_status", "samaya_solve_status", "samaya_seconds", "samaya_wall_seconds"]
@@ -62,6 +68,14 @@ def parse_samaya(text: str) -> dict:
                          r"implied_free_rejected_by_tolerance (\d+)", text)
     if counters:
         result.update(zip([f"samaya_{c}" for c in COUNTERS[3:]], map(int, counters.groups())))
+    # Binaries before the doubleton rule do not print this line; their fields stay blank.
+    doubletons = re.search(r"Presolve doubletons: (\d+) continuous, (\d+) integer; rejected: "
+                           r"(\d+) pivot, (\d+) integer_data, (\d+) divisibility, "
+                           r"(\d+) integer_bound, (\d+) crossed_bounds, (\d+) residual, "
+                           r"(\d+) nonfinite", text)
+    if doubletons:
+        result.update(zip([f"samaya_{c}" for c in DOUBLETON_COUNTERS],
+                          map(int, doubletons.groups())))
     if "Presolve: infeasib" in line:
         result["samaya_status"] = "infeasible"
         passes = re.search(r"passes (\d+)", line)
@@ -249,6 +263,15 @@ def self_test() -> None:
     assert mip["samaya_status"] == "reduced" and mip["samaya_nonzeros"] == 9
     assert mip["samaya_rows_removed"] == 16 and mip["samaya_cols_removed"] == 25
     assert mip["samaya_implied_free_col_singletons"] == 11
+    assert mip["samaya_implied_free_rejected_by_tolerance"] == 12
+    assert "samaya_doubleton_integer_cols" not in mip
+    doubletons = ("Presolve doubletons: 13 continuous, 14 integer; rejected: 15 pivot, "
+                  "16 integer_data, 17 divisibility, 18 integer_bound, 19 crossed_bounds, "
+                  "20 residual, 21 nonfinite\n")
+    mip = parse_samaya("Presolve: 20 rows, 30 cols (15 integer) -> 4 rows, 5 cols (3 integer); "
+                        "nonzeros 80 -> 9; passes 2; presolve_seconds 0.001\n" + counters
+                        + doubletons)
+    assert [mip[f"samaya_{c}"] for c in DOUBLETON_COUNTERS] == list(range(13, 22))
     assert mip["samaya_implied_free_rejected_by_tolerance"] == 12
     lp = parse_samaya("Presolve: 20 rows, 30 cols -> 4 rows, 5 cols, 9 nonzeros (2 passes); "
                        "original_nonzeros 80; presolve_seconds 2e-3\n" + counters)

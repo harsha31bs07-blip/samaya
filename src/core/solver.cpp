@@ -121,6 +121,13 @@ void log_presolve_stats(const Logger& log, const PresolveStats& st) {
           st.duplicate_rows, st.fixed_cols, st.empty_cols, st.dominated_cols,
           st.free_col_singletons, st.bounds_tightened, st.implied_free_col_singletons,
           st.implied_free_rejected_by_tolerance);
+  log.log(2,
+          "Presolve doubletons: %d continuous, %d integer; rejected: %d pivot, %d integer_data, "
+          "%d divisibility, %d integer_bound, %d crossed_bounds, %d residual, %d nonfinite",
+          st.doubleton_continuous_cols, st.doubleton_integer_cols, st.doubleton_rejected_pivot,
+          st.doubleton_rejected_integer_data, st.doubleton_rejected_divisibility,
+          st.doubleton_rejected_integer_bound, st.doubleton_rejected_crossed_bounds,
+          st.doubleton_rejected_residual, st.doubleton_rejected_nonfinite);
 }
 
 bool solve_presolved_lp(const Model& model, const Params& requested, const Logger& log,
