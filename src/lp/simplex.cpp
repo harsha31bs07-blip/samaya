@@ -122,6 +122,7 @@ Simplex::Simplex(const LpProblem& lp, const SimplexOptions& options, const Logge
   alpha_row_.assign(nt, 0.0);
   in_row_nz_.assign(nt, 0);
   alpha_col_.assign(m, 0.0);
+  in_infeasible_.assign(m, 0);
 }
 
 template <typename F>
@@ -207,6 +208,30 @@ void Simplex::compute_primal() {
   }
   factor_.ftran(rhs);
   for (Index k = 0; k < m_; ++k) x_[basic_[k]] = rhs[k];
+  rebuild_infeasible_list();
+}
+
+bool Simplex::primal_infeasible(Index j) const {
+  const double tol = options_.primal_tol;
+  return x_[j] < lower_[j] - tol || x_[j] > upper_[j] + tol;
+}
+
+void Simplex::rebuild_infeasible_list() {
+  for (const Index k : infeasible_) in_infeasible_[k] = 0;
+  infeasible_.clear();
+  for (Index k = 0; k < m_; ++k) {
+    if (primal_infeasible(basic_[k])) {
+      in_infeasible_[k] = 1;
+      infeasible_.push_back(k);
+    }
+  }
+}
+
+void Simplex::note_basic_change(Index position) {
+  if (!in_infeasible_[position] && primal_infeasible(basic_[position])) {
+    in_infeasible_[position] = 1;
+    infeasible_.push_back(position);
+  }
 }
 
 void Simplex::compute_dual() {
@@ -380,11 +405,12 @@ bool Simplex::limit_reached(SimplexStatus& status) const {
   return false;
 }
 
-Index Simplex::choose_leaving_row() const {
+Index Simplex::choose_leaving_row() {
   Index best = -1;
   double best_score = 0.0;
   const double tol = options_.primal_tol;
-  for (Index k = 0; k < m_; ++k) {
+  // Dual steepest-edge score of position k, or -1 when it is feasible.
+  const auto score_of = [&](Index k) {
     const Index j = basic_[k];
     double infeasibility = 0.0;
     if (x_[j] < lower_[j] - tol) {
@@ -392,15 +418,39 @@ Index Simplex::choose_leaving_row() const {
     } else if (x_[j] > upper_[j] + tol) {
       infeasibility = x_[j] - upper_[j];
     } else {
-      continue;
+      return -1.0;
     }
     // A non-finite weight would hide the row from pricing forever.
     const double w = std::isfinite(dse_weight_[k]) ? dse_weight_[k] : 1.0;
-    const double score = infeasibility * infeasibility / w;
-    if (score > best_score) {
+    return infeasibility * infeasibility / w;
+  };
+  if (options_.chuzr_full_scan) {
+    for (Index k = 0; k < m_; ++k) {
+      const double score = score_of(k);
+      if (score > best_score) {
+        best_score = score;
+        best = k;
+      }
+    }
+    return best;
+  }
+  if (profile_) stats_.chuzr_list.add(static_cast<long long>(infeasible_.size()));
+  // The list is unordered: an equal score goes to the lower position, as in the scan, so both
+  // choose the same row.
+  for (std::size_t t = 0; t < infeasible_.size();) {
+    const Index k = infeasible_[t];
+    const double score = score_of(k);
+    if (score < 0.0) {
+      in_infeasible_[k] = 0;
+      infeasible_[t] = infeasible_.back();
+      infeasible_.pop_back();
+      continue;
+    }
+    if (score > best_score || (score == best_score && best >= 0 && k < best)) {
       best_score = score;
       best = k;
     }
+    ++t;
   }
   return best;
 }
@@ -496,7 +546,10 @@ void Simplex::apply_flips() {
   ProfileTimer measurement(time_iteration_, stats_, Component::kFlipFtran);
   factor_.ftran(column);
   measurement.switch_to(Component::kPrimalUpdate);
-  for (Index k = 0; k < m_; ++k) x_[basic_[k]] -= column[k];
+  for (Index k = 0; k < m_; ++k) {
+    x_[basic_[k]] -= column[k];
+    if (column[k] != 0.0) note_basic_change(k);
+  }
   stats_.bound_flips += static_cast<long long>(flips_.size());
 }
 
@@ -531,6 +584,8 @@ SimplexStatus Simplex::dual_loop() {
   } else if (!rebuild()) {
     return SimplexStatus::kNumericalError;
   }
+  // Bounds may have changed since the last primal values (phase 1 boxes, a warm start).
+  rebuild_infeasible_list();
   correct_dual_infeasibilities();
   bool fresh = true;
   const auto refresh = [&](RebuildReason reason) {
@@ -633,7 +688,10 @@ SimplexStatus Simplex::dual_loop() {
     measurement.switch_to(Component::kPrimalUpdate);
     // Primal step: p moves exactly to the violated bound.
     const double theta_p = delta / a_col;
-    for (Index k = 0; k < m_; ++k) x_[basic_[k]] -= theta_p * alpha_col_[k];
+    for (Index k = 0; k < m_; ++k) {
+      x_[basic_[k]] -= theta_p * alpha_col_[k];
+      if (alpha_col_[k] != 0.0) note_basic_change(k);
+    }
     x_[q] += theta_p;
     x_[p] = bound;
 
@@ -657,6 +715,7 @@ SimplexStatus Simplex::dual_loop() {
     status_[q] = VarStatus::kBasic;
     position_[p] = -1;
     status_[p] = (to_lower || lower_[p] == upper_[p]) ? VarStatus::kAtLower : VarStatus::kAtUpper;
+    note_basic_change(r);
     ++iterations_;
     ++stats_.dual_iterations;
     if (profile_) {
@@ -1062,6 +1121,7 @@ void Simplex::finish_profile() {
   };
   count_row("dual ratio candidates", stats_.ratio_candidates);
   count_row("dual Harris groups", stats_.harris_groups);
+  count_row("CHUZR infeasibility list", stats_.chuzr_list);
   constexpr const char* reasons[] = {
       "initial", "phase", "interval", "fill_limit", "unsafe_update", "mismatch", "numerical",
       "confirmation", "rank_repair"};

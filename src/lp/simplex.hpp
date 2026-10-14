@@ -65,6 +65,7 @@ struct SimplexStats {
   long long rebuild_calls = 0;  // A call can contain several factorization attempts/rank repairs.
   MeasurementCount rho_nnz, alpha_col_nnz, tau_nnz, flip_rhs_nnz;
   MeasurementCount ratio_candidates, harris_groups;  // Dual ratio-test calls, including retries.
+  MeasurementCount chuzr_list;  // Length of the infeasibility list at each CHUZR.
   BasisFactor::Stats factor;
   std::array<double, static_cast<std::size_t>(Component::kCount)> seconds{};
   // Raw sampled component seconds; seconds above contains the estimates at solve completion.
@@ -87,6 +88,9 @@ struct SimplexOptions {
   std::uint64_t seed = 1;
   bool collect_stats = false;  // Detailed counters/timing; also enabled automatically at log level 2.
   int timing_sample_interval = 32;  // 1: time every iteration; counters/densities are always exact.
+  // CHUZR scans all m basic rows instead of the infeasibility list. The two choose the same row
+  // (ties go to the lowest position in both); the scan is the reference of the equivalence tests.
+  bool chuzr_full_scan = false;
 };
 
 // Bounded dual simplex with dual steepest-edge pricing, a Harris two-pass ratio test, cost
@@ -163,7 +167,10 @@ class Simplex {
   SimplexStatus dual_loop();
   SimplexStatus primal_loop(LoopResult& result);
 
-  Index choose_leaving_row() const;
+  Index choose_leaving_row();
+  bool primal_infeasible(Index j) const;
+  void rebuild_infeasible_list();
+  void note_basic_change(Index position);
   Index dual_ratio_test(double direction, double slope);
   void apply_flips();
   Index choose_entering_column() const;
@@ -205,6 +212,11 @@ class Simplex {
   std::vector<char> in_row_nz_;
   std::vector<Index> candidates_;   // Ratio test workspace.
   std::vector<Index> flips_;        // Boxed variables flipped by the long-step ratio test.
+  // Basis positions that may be primal infeasible: every infeasible position is listed (entries
+  // can be stale-feasible; CHUZR drops them). Rebuilt with the primal values, then kept up to
+  // date for each position whose value changes in the dual loop.
+  std::vector<Index> infeasible_;
+  std::vector<char> in_infeasible_;
   std::vector<double> alpha_col_;
   std::vector<double> spike_;
   std::vector<double> dual_ray_;

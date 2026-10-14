@@ -1,6 +1,7 @@
 // Differential tests: the sparse dual simplex against the dense reference simplex on randomly
 // generated LPs.
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -405,6 +406,70 @@ TEST(lp_random_profile_preserves_objective_bits_and_iterations) {
     }
   }
   CHECK(profiled_iterations > 100);
+}
+
+// CHUZR over the infeasibility list must choose the same rows as the full scan: identical
+// iterations and bitwise-identical results, cold, warm, and warm after bound changes (as in
+// branch and bound), across the random families (phase 1, infeasible, unbounded included).
+TEST(lp_random_chuzr_list_matches_full_scan) {
+  std::mt19937 rng(20261015);
+  const samaya::Logger quiet(0);
+  long long iterations = 0;
+  long long listed = 0;
+  int solves = 0;
+  const auto same_bits = [](const std::vector<double>& a, const std::vector<double>& b) {
+    REQUIRE(a.size() == b.size());
+    for (std::size_t j = 0; j < a.size(); ++j) {
+      CHECK_EQ(std::bit_cast<std::uint64_t>(a[j]), std::bit_cast<std::uint64_t>(b[j]));
+    }
+  };
+  const auto both = [&](const Model& model, LpSolveOptions options) {
+    options.simplex.chuzr_full_scan = true;
+    const LpResult scan = samaya::solve_lp(model, options, quiet);
+    options.simplex.chuzr_full_scan = false;
+    options.simplex.collect_stats = true;
+    const LpResult list = samaya::solve_lp(model, options, quiet);
+    CHECK(scan.status == list.status);
+    CHECK_EQ(scan.iterations, list.iterations);
+    CHECK_EQ(std::bit_cast<std::uint64_t>(scan.objective),
+             std::bit_cast<std::uint64_t>(list.objective));
+    CHECK(scan.basis == list.basis);
+    same_bits(scan.col_value, list.col_value);
+    same_bits(scan.row_dual, list.row_dual);
+    same_bits(scan.col_dual, list.col_dual);
+    same_bits(scan.dual_ray, list.dual_ray);
+    same_bits(scan.primal_ray, list.primal_ray);
+    iterations += list.iterations;
+    listed += list.stats.chuzr_list.count;
+    ++solves;
+    return list;
+  };
+  for (LpFamily family : {LpFamily::kFeasible, LpFamily::kRandom, LpFamily::kDegenerate,
+                          LpFamily::kLoose, LpFamily::kBoxed}) {
+    for (int k = 0; k < 40; ++k) {
+      Model model = samaya::test::random_lp(family, 30, 40, rng);
+      LpSolveOptions options;
+      options.scale = k % 3 != 0;
+      options.simplex.perturb = k % 2 == 0;
+      if (k % 4 == 0) options.simplex.refactor_interval = 3;
+      const LpResult cold = both(model, options);
+      if (cold.status != SimplexStatus::kOptimal) continue;
+      options.start = cold.basis;
+      both(model, options);
+      // Branch-and-bound style: tighten a column's bounds around its value and warm start.
+      std::uniform_int_distribution<samaya::Index> pick(0, model.num_cols() - 1);
+      const samaya::Index j = pick(rng);
+      const double v = cold.col_value[j];
+      model.col_upper[j] = std::max(model.col_lower[j], std::floor(v));
+      both(model, options);
+      model.col_upper[j] = samaya::kInf;
+      model.col_lower[j] = std::ceil(v) + 1.0;
+      both(model, options);
+    }
+  }
+  CHECK(solves > 400);
+  CHECK(iterations > 2000);
+  CHECK(listed > 0);  // The list path ran (profile counts its CHUZR calls).
 }
 
 TEST(lp_profile_counts_rank_repairs_and_resets_on_reused_warm_start) {

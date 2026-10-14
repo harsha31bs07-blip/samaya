@@ -108,8 +108,11 @@ against the uninstrumented 905c1a5 build, alternating, best of 2 rounds: geomean
   policy is the cheapest change in the plan. The factorization itself (1.26 s for this basis)
   is a separate question for step 3.
 - Step 1 matters for the large LP (CHUZR 15%). On Netlib its share is small. There the pivot
-  row (19.5%) leads: computing rho^T A_N row-wise over rho's nonzeros, with a row-wise copy of
-  A (HiGHS's PRICE by row), joins step 1.
+  row (19.5%) leads, but it is already computed row by row over rho's nonzeros
+  (`compute_pivot_row`, using the row-wise copy `At`). What remains there is the O(m) scan for
+  those nonzeros, which needs rho's index list from a hyper-sparse BTRAN (step 3). Step 1
+  therefore starts with CHUZR over a maintained list of infeasible rows (1b), with ties broken
+  as the scan does, so iteration paths stay identical.
 - Step 3: FTRAN and BTRAN together take 31% of the large LP and 31% of Netlib, at densities
   around 2%, so hyper-sparse solves are worth building.
 - Step 6 is likely the largest lever for the hour: the crossover basis needs 110,681 repairs. At
@@ -170,8 +173,10 @@ later. How many of the 86,912 iterations were repair is unknown until step 0.
 
 ## Order
 
-Step 0 is done (results above). Then 2, then 1 with the row-wise pivot row, then 3. Step 6 can
-run alongside, since it touches `crossover.cpp`, not the iteration. Then 4; step 5 is dropped. Every step: the Netlib and
+Step 0 is done (results above). Then 2 and 1b (the CHUZR list), then 3, which also gives the
+index lists for the rest of step 1. Step 6 can run alongside, since it touches
+`crossover.cpp`, not the iteration; its first part (repair at PDLP-nearest bounds) is in
+1757a8d. Then 4; step 5 is dropped. Every step: the Netlib and
 random-family differential tests, the verifier unchanged, the four presets, a planted bug.
 Gate (from POST_SUBMISSION_PLAN W4): Netlib geomean from 0.37 s to 0.25 s or better with nothing
 lost, and the large-LP crossover finishing within the hour.
