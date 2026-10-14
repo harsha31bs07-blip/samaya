@@ -11,6 +11,7 @@
 
 #include "core/log.hpp"
 #include "lp/lp_solver.hpp"
+#include "lp_generators.hpp"
 #include "presolve/presolve.hpp"
 #include "reference_lp.hpp"
 #include "reference_milp.hpp"
@@ -25,6 +26,20 @@ using samaya::Presolve;
 using samaya::PresolveStatus;
 using samaya::test::ReferenceLp;
 using samaya::test::ReferenceResult;
+
+namespace samaya {
+
+// Exercise C3 alone for atomic rejection and boundary cases, without earlier reductions.
+struct PresolveSubstitutionTestAccess {
+  static bool substitutions(Presolve& p) {
+    bool changed = false;
+    p.process_substitutions(changed);
+    p.build_reduced();
+    return changed;
+  }
+};
+
+}  // namespace samaya
 
 TEST(presolve_near_parallel_equations_remain_feasible) {
   const double eps = std::ldexp(1.0, -41);
@@ -554,15 +569,19 @@ TEST(presolve_implied_free_later_bound_tightening) {
   model.A = samaya::SparseMatrix::from_triplets(3, 4,
       {{0, 0, 1.0}, {0, 1, 1.0}, {1, 1, 1.0}, {1, 2, 1.0},
        {2, 1, 1.0}, {2, 3, 1.0}});
+  // C3 would substitute column 1 out of its equations first; this test isolates C1.
   samaya::PresolveOptions first_pass;
   first_pass.max_passes = 1;
+  first_pass.substitute = false;
   Presolve early(model, first_pass);
   REQUIRE(early.run() == PresolveStatus::kReduced);
   CHECK_EQ(early.stats().implied_free_col_singletons, 1);
   CHECK_EQ(early.stats().bounds_tightened, 0);
   CHECK(std::find(early.col_map().begin(), early.col_map().end(), 0) == early.col_map().end());
   CHECK(std::find(early.col_map().begin(), early.col_map().end(), 1) != early.col_map().end());
-  Presolve p(model);
+  samaya::PresolveOptions c1_only;
+  c1_only.substitute = false;
+  Presolve p(model, c1_only);
   REQUIRE(p.run() == PresolveStatus::kReduced);
   CHECK_EQ(p.stats().implied_free_col_singletons, 2);  // x first, the last column after y is fixed.
   CHECK(p.stats().passes >= 2);
@@ -954,12 +973,19 @@ TEST(presolve_doubleton_lp_mode_does_not_fire) {
   model.col_type.assign(3, samaya::VarType::kContinuous);
   samaya::PresolveOptions options;
   options.max_passes = 1;
+  // C3 may substitute an implied-free column of this LP; this test isolates C2.
+  options.substitute = false;
   Presolve p(model, options);
   REQUIRE(p.run() == PresolveStatus::kReduced);
   CHECK_EQ(p.stats().doubleton_continuous_cols, 0);
   CHECK_EQ(p.stats().doubleton_integer_cols, 0);
   CHECK_EQ(p.reduced().num_cols(), 3);
   check_implied_postsolve(model, p);
+  // With C3 on, C2 still stays off in LP mode and the reduced model still postsolves.
+  Presolve with_c3(model, samaya::PresolveOptions{.max_passes = 1});
+  REQUIRE(with_c3.run() == PresolveStatus::kReduced);
+  CHECK_EQ(with_c3.stats().doubleton_continuous_cols + with_c3.stats().doubleton_integer_cols, 0);
+  check_implied_postsolve(model, with_c3);
 }
 
 TEST(presolve_doubleton_survivor_tightened_fixed_or_eliminated_later) {
@@ -1080,4 +1106,454 @@ TEST(presolve_doubleton_differential_with_and_without_presolve) {
               "eliminations (600 MILPs, presolve on/off)\n", optimal, infeasible, continuous, integral);
   CHECK(continuous >= 150);
   CHECK(integral >= 150);
+}
+
+
+namespace {
+
+Model substitution_model(double a = 1.0, double b = 2.0, double c = 2.0,
+                         double rhs = 2.0, bool integer_x = false) {
+  Model model;
+  model.obj = {1.0, -2.0, -0.5};
+  model.obj_offset = 1.25;
+  model.col_lower = {-20.0, -2.0, -2.0};
+  model.col_upper = {20.0, 2.0, 2.0};
+  model.col_type.assign(3, samaya::VarType::kContinuous);
+  if (integer_x) model.col_type.assign(3, samaya::VarType::kInteger);
+  model.row_lower = {rhs, -kInf, -kInf, -kInf};
+  model.row_upper = {rhs, 1.0, 1.0, 1.0};
+  model.A = samaya::SparseMatrix::from_triplets(4, 3,
+      {{0, 0, a}, {0, 1, b}, {0, 2, c},
+       {1, 0, 1.0}, {1, 1, 1.0}, {1, 2, 1.0},
+       {2, 0, -1.0}, {2, 1, 2.0}, {2, 2, -1.0},
+       {3, 1, 1.0}, {3, 2, -1.0}});
+  return model;
+}
+
+samaya::PresolveOptions substitution_options(bool mip = false, int passes = 50) {
+  samaya::PresolveOptions options;
+  options.mip = mip;
+  options.max_passes = passes;
+  return options;
+}
+
+void check_substitution_unchanged(const Model& model, const Presolve& p) {
+  REQUIRE(p.reduced().num_rows() == model.num_rows());
+  REQUIRE(p.reduced().num_cols() == model.num_cols());
+  REQUIRE(p.reduced().A.nnz() == model.A.nnz());
+  CHECK(std::equal(model.A.values().begin(), model.A.values().end(), p.reduced().A.values().begin()));
+  CHECK(std::equal(model.A.row_index().begin(), model.A.row_index().end(),
+                   p.reduced().A.row_index().begin()));
+  CHECK(p.reduced().row_lower == model.row_lower);
+  CHECK(p.reduced().row_upper == model.row_upper);
+  CHECK(p.reduced().obj == model.obj);
+  CHECK_EQ(p.reduced().obj_offset, model.obj_offset);
+}
+
+// Add an equation defining x from 2--5 bounded neighbours of a generated random core.
+// x's finite bounds strictly contain the whole implied interval, for either pivot sign.
+Model substitution_family(std::mt19937& rng, bool mip, int variant) {
+  const auto family = static_cast<samaya::test::LpFamily>(variant % 5);
+  Model core = samaya::test::random_lp(family, 5, 5, rng);
+  const Index neighbours = std::uniform_int_distribution<Index>(2, 5)(rng);
+  const Index n = std::max(core.num_cols(), neighbours);
+  core.obj.resize(n, 1.0);
+  core.col_lower.resize(n, -2.0);
+  core.col_upper.resize(n, 2.0);
+  core.col_type.resize(n, samaya::VarType::kContinuous);
+  // Bound the tiny MILP reference search; retain the generated row families, including
+  // infeasible and degenerate cores. LP loose families still include unbounded instances.
+  for (Index j = 0; j < n; ++j) {
+    if (mip || j < neighbours) {
+      if (!std::isfinite(core.col_lower[j])) core.col_lower[j] = -3.0;
+      if (!std::isfinite(core.col_upper[j])) core.col_upper[j] = core.col_lower[j] + 4.0;
+    }
+    if (mip && (variant % 3 == 0 || j % 2 == 0)) core.col_type[j] = samaya::VarType::kInteger;
+  }
+  Model model = core;
+  const Index x = n;
+  const double a = variant % 2 == 0 ? 2.0 : -2.0;
+  const bool integer_x = mip && variant % 3 == 0;
+  const double rhs = 2.0 * std::uniform_int_distribution<int>(-2, 2)(rng);
+  std::vector<samaya::Triplet> entries;
+  // Put the planted equation first, before other generated equations compete for x.
+  entries.push_back({0, x, a});
+  double min_act = 0.0, max_act = 0.0;
+  for (Index j = 0; j < neighbours; ++j) {
+    double b = 2.0 * std::uniform_int_distribution<int>(-3, 3)(rng);
+    if (b == 0.0) b = 2.0;
+    entries.push_back({0, j, b});
+    min_act += b * (b > 0.0 ? model.col_lower[j] : model.col_upper[j]);
+    max_act += b * (b > 0.0 ? model.col_upper[j] : model.col_lower[j]);
+  }
+  double lo = (rhs - max_act) / a, up = (rhs - min_act) / a;
+  if (a < 0.0) std::swap(lo, up);
+  model.obj.push_back(std::uniform_int_distribution<int>(-3, 3)(rng));
+  model.col_lower.push_back(lo - 2.0);
+  model.col_upper.push_back(up + 2.0);
+  model.col_type.push_back(integer_x ? samaya::VarType::kInteger : samaya::VarType::kContinuous);
+  model.row_lower.insert(model.row_lower.begin(), rhs);
+  model.row_upper.insert(model.row_upper.begin(), rhs);
+  const auto starts = core.A.col_start();
+  const auto indices = core.A.row_index();
+  const auto values = core.A.values();
+  for (Index j = 0; j < core.A.cols(); ++j) {
+    for (auto k = starts[j]; k < starts[j + 1]; ++k) entries.push_back({indices[k] + 1, j, values[k]});
+  }
+  // Two extra rows couple x to the core and make some optima depend on their duals.
+  for (Index r = 0; r < 2; ++r) {
+    const Index i = static_cast<Index>(model.row_lower.size());
+    entries.insert(entries.end(), {{i, x, r == 0 ? 1.0 : -1.0}, {i, 0, 1.0},
+                                  {i, 1, r == 0 ? -1.0 : 2.0}});
+    model.row_lower.push_back(-kInf);
+    model.row_upper.push_back(std::uniform_int_distribution<int>(1, 8)(rng));
+  }
+  model.A = samaya::SparseMatrix::from_triplets(static_cast<Index>(model.row_lower.size()), n + 1,
+                                               std::move(entries));
+  return model;
+}
+
+}  // namespace
+
+TEST(presolve_substitution_primal_dual_both_signs_and_senses) {
+  for (const double a : {1.0, -2.0}) {
+    for (const auto sense : {samaya::ObjSense::kMinimize, samaya::ObjSense::kMaximize}) {
+      Model model = substitution_model(a);
+      model.sense = sense;
+      Presolve p(model);
+      REQUIRE(p.run() == PresolveStatus::kReduced);
+      CHECK(p.stats().substitution_continuous_cols > 0);
+      check_implied_postsolve(model, p);
+      // Also exercise the snapshot while both other rows still exist.
+      Presolve early(model, substitution_options(false, 1));
+      REQUIRE(early.run() == PresolveStatus::kReduced);
+      CHECK(early.stats().substitution_continuous_cols > 0);
+      check_implied_postsolve(model, early);
+    }
+  }
+}
+
+TEST(presolve_substitution_continuous_mip) {
+  Model model = substitution_model();
+  model.col_type[1] = model.col_type[2] = samaya::VarType::kInteger;
+  Presolve p(model, substitution_options(true));
+  const auto status = p.run();
+  REQUIRE(status == PresolveStatus::kReduced);
+  CHECK(p.stats().substitution_continuous_cols > 0);
+  check_doubleton_reference(model, p, status);
+}
+
+TEST(presolve_substitution_exact_zero_removes_entry) {
+  Model model = substitution_model();  // x + 2y + 2z = 2.
+  model.A = samaya::SparseMatrix::from_triplets(4, 3,
+      {{0, 0, 1.0}, {0, 1, 2.0}, {0, 2, 2.0},
+       {1, 0, 1.0}, {1, 1, 2.0}, {1, 2, 3.0},
+       {2, 0, -1.0}, {2, 1, 2.0}, {2, 2, -1.0}, {3, 1, 1.0}, {3, 2, -1.0}});
+  Presolve p(model, substitution_options(false, 1));
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().substitution_continuous_cols, 1);
+  CHECK_EQ(p.reduced().A.nnz(), 5);
+  const auto starts = p.reduced().A.col_start();
+  const auto rows = p.reduced().A.row_index();
+  // y's entry in original row 1 is exactly zero and must be absent.
+  for (auto k = starts[0]; k < starts[1]; ++k) CHECK(p.row_map()[rows[k]] != 1);
+  check_implied_postsolve(model, p);
+}
+
+TEST(presolve_substitution_exact_integer_divisibility) {
+  for (const double a : {2.0, -2.0}) {
+    for (const double b : {4.0, 3.0, 4.5}) {
+      const Model model = substitution_model(a, b, 2.0, 2.0, true);
+      Presolve p(model, substitution_options(true, 1));
+      REQUIRE(p.run() == PresolveStatus::kReduced);
+      if (b == 4.0) CHECK_EQ(p.stats().substitution_integer_cols, 1);
+      else {
+        CHECK_EQ(p.stats().substitution_integer_cols, 0);
+        CHECK(p.stats().substitution_rejected_integer > 0);
+      }
+      check_doubleton_reference(model, p, PresolveStatus::kReduced);
+    }
+    const Model model = substitution_model(a, 4.0, 2.0, 1.0, true);
+    Presolve p(model, substitution_options(true, 1));
+    REQUIRE(p.run() == PresolveStatus::kReduced);
+    CHECK_EQ(p.stats().substitution_integer_cols, 0);
+    CHECK(p.stats().substitution_rejected_integer > 0);
+    check_doubleton_reference(model, p, PresolveStatus::kReduced);
+  }
+}
+
+TEST(presolve_substitution_nonredundant_and_tolerance_bounds) {
+  for (const double bound : {1.0, 6.0, 6.0 + 1e-13}) {
+    Model model = substitution_model();  // x's implied range is [-6, 10].
+    model.col_lower[0] = -bound;
+    Presolve p(model, substitution_options(false, 1));
+    REQUIRE(p.run() == PresolveStatus::kReduced);
+    CHECK_EQ(p.stats().substitution_continuous_cols, 0);
+    if (bound == 1.0) CHECK(p.stats().substitution_rejected_not_implied_free > 0);
+    else CHECK(p.stats().substitution_rejected_by_tolerance > 0);
+    check_implied_postsolve(model, p);
+  }
+}
+
+TEST(presolve_substitution_residual_rejected_atomically) {
+  Model model = substitution_model();
+  const double eps = std::ldexp(1.0, -41);
+  model.A = samaya::SparseMatrix::from_triplets(4, 3,
+      {{0, 0, 1.0}, {0, 1, 2.0}, {0, 2, 2.0},
+       {1, 0, 1.0}, {1, 1, 2.0 + eps}, {1, 2, 3.0},
+       {2, 0, -1.0}, {2, 1, 2.0}, {2, 2, -1.0}, {3, 1, 1.0}, {3, 2, -1.0}});
+  Presolve p(model, substitution_options(false, 1));
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().substitution_continuous_cols, 0);
+  CHECK_EQ(p.stats().substitution_rejected_residual, 1);
+  check_substitution_unchanged(model, p);
+}
+
+TEST(presolve_substitution_fill_limit_and_length_caps) {
+  // Five new neighbours in each of three other rows gives fill 15, excluding x itself.
+  Model model;
+  model.obj.assign(8, 1.0);
+  model.obj[6] = -1.0;  // Prevent a dominated-column reduction from consuming this fixture.
+  model.col_lower.assign(8, -1.0);
+  model.col_upper.assign(8, 1.0);
+  model.col_lower[0] = -100.0;
+  model.col_upper[0] = 100.0;
+  model.col_type.assign(8, samaya::VarType::kContinuous);
+  model.row_lower = {0.0, -kInf, -kInf, -kInf};
+  model.row_upper = {0.0, 1.0, 1.0, 1.0};
+  std::vector<samaya::Triplet> entries = {{0, 0, 1.0}, {1, 0, 1.0}, {2, 0, -1.0},
+      {3, 0, 2.0}, {1, 6, 1.0}, {1, 7, 1.0}, {2, 6, 1.0}, {2, 7, -1.0},
+      {3, 6, 2.0}, {3, 7, -1.0}};
+  for (Index j = 1; j <= 5; ++j) {
+    entries.insert(entries.end(), {{0, j, 1.0}, {j + 3, j, 1.0}, {j + 3, 6, 1.0}});
+    model.row_lower.push_back(-kInf);
+    model.row_upper.push_back(0.5);
+  }
+  model.A = samaya::SparseMatrix::from_triplets(9, 8, entries);
+  Presolve p(model, substitution_options(false, 1));
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().substitution_rejected_fill, 1);
+  CHECK_EQ(p.stats().substitution_continuous_cols, 0);
+  check_substitution_unchanged(model, p);
+
+  // Reducing to two other rows is exactly the accepted fill limit of 10.
+  entries.erase(std::remove_if(entries.begin(), entries.end(),
+                              [](const samaya::Triplet& t) { return t.row == 3; }), entries.end());
+  model.A = samaya::SparseMatrix::from_triplets(9, 8, entries);
+  Presolve boundary(model);
+  CHECK(samaya::PresolveSubstitutionTestAccess::substitutions(boundary));
+  CHECK_EQ(boundary.stats().substitution_continuous_cols, 1);
+  CHECK_EQ(boundary.stats().substitution_rejected_fill, 0);
+  check_implied_postsolve(model, boundary);
+
+  Model long_col = substitution_model();
+  std::vector<samaya::Triplet> long_entries = {{0, 0, 1.0}, {0, 1, 2.0}, {0, 2, 2.0}};
+  long_col.row_lower.assign(12, -kInf);
+  long_col.row_upper.assign(12, 1.0);
+  long_col.row_lower[0] = long_col.row_upper[0] = 2.0;
+  for (Index i = 1; i < 12; ++i) long_entries.insert(long_entries.end(),
+      {{i, 0, i % 2 == 0 ? 1.0 : -1.0}, {i, 1, 1.0}, {i, 2, 1.0}});
+  long_col.A = samaya::SparseMatrix::from_triplets(12, 3, long_entries);
+  Presolve q(long_col);
+  CHECK(!samaya::PresolveSubstitutionTestAccess::substitutions(q));
+  CHECK(q.stats().substitution_rejected_col_length > 0);
+  check_substitution_unchanged(long_col, q);
+
+  Model long_row;
+  long_row.obj.assign(11, 1.0);
+  long_row.col_lower.assign(11, -1.0);
+  long_row.col_upper.assign(11, 1.0);
+  long_row.col_type.assign(11, samaya::VarType::kContinuous);
+  long_row.row_lower = long_row.row_upper = {0.0};
+  std::vector<samaya::Triplet> row_entries;
+  for (Index j = 0; j < 11; ++j) row_entries.push_back({0, j, 1.0});
+  long_row.A = samaya::SparseMatrix::from_triplets(1, 11, std::move(row_entries));
+  Presolve r(long_row);
+  CHECK(!samaya::PresolveSubstitutionTestAccess::substitutions(r));
+  CHECK_EQ(r.stats().substitution_rejected_row_length, 1);
+  check_substitution_unchanged(long_row, r);
+}
+
+TEST(presolve_substitution_nonfinite_objective_rejected_atomically) {
+  Model model = substitution_model();
+  model.obj[0] = 1e308;
+  Presolve p(model, substitution_options(false, 1));
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().substitution_continuous_cols, 0);
+  CHECK_EQ(p.stats().substitution_rejected_nonfinite, 1);
+  check_substitution_unchanged(model, p);
+}
+
+TEST(presolve_substitution_differential_with_and_without_presolve) {
+  std::mt19937 rng(14102026);
+  Index lp_substitutions = 0, mip_substitutions = 0, integer_substitutions = 0;
+  int lp_instances = 0, mip_instances = 0;
+  int optimal = 0, infeasible = 0, unbounded = 0;
+  for (const bool mip : {false, true}) {
+    for (int k = 0; k < 600; ++k) {
+      const Model model = substitution_family(rng, mip, k);
+      samaya::Status expected;
+      double objective = 0.0;
+      if (mip) {
+        const auto ref = samaya::test::reference_milp(model);
+        REQUIRE(ref.status == samaya::test::ReferenceMilpResult::Status::kOptimal ||
+                ref.status == samaya::test::ReferenceMilpResult::Status::kInfeasible);
+        expected = ref.status == samaya::test::ReferenceMilpResult::Status::kOptimal
+            ? samaya::Status::kOptimal : samaya::Status::kInfeasible;
+        objective = ref.objective;
+      } else {
+        const auto ref = ReferenceLp(model).solve();
+        expected = ref.status == ReferenceResult::Status::kOptimal ? samaya::Status::kOptimal
+            : ref.status == ReferenceResult::Status::kInfeasible ? samaya::Status::kInfeasible
+                                                                : samaya::Status::kUnbounded;
+        objective = ref.objective;
+      }
+      if (expected == samaya::Status::kOptimal) ++optimal;
+      else if (expected == samaya::Status::kInfeasible) ++infeasible;
+      else ++unbounded;
+      Presolve p(model, substitution_options(mip));
+      const auto status = p.run();
+      const Index fired = p.stats().substitution_continuous_cols + p.stats().substitution_integer_cols;
+      (mip ? mip_substitutions : lp_substitutions) += fired;
+      integer_substitutions += p.stats().substitution_integer_cols;
+      if (fired > 0) ++(mip ? mip_instances : lp_instances);
+      if (mip) check_doubleton_reference(model, p, status);  // No solver fallback.
+      else if (expected == samaya::Status::kOptimal) {
+        REQUIRE(status == PresolveStatus::kReduced);
+        check_implied_postsolve(model, p);  // Original-model dual verification.
+      } else if (status == PresolveStatus::kInfeasible) {
+        CHECK(expected == samaya::Status::kInfeasible);
+      } else {
+        const auto reduced_ref = ReferenceLp(p.reduced()).solve();
+        CHECK(reduced_ref.status == (expected == samaya::Status::kInfeasible
+            ? ReferenceResult::Status::kInfeasible : ReferenceResult::Status::kUnbounded));
+      }
+      for (const bool enabled : {false, true}) {
+        samaya::Params params;
+        params.log_level = 0;
+        params.presolve = enabled;
+        const auto result = samaya::Solver(params).solve(model);
+        CHECK(result.status == expected);
+        if (!mip || expected == samaya::Status::kOptimal) CHECK(result.verified);
+        if (expected == samaya::Status::kOptimal) {
+          CHECK_NEAR(result.objective, objective, 1e-6 * (1.0 + std::fabs(objective)));
+          if (!mip) CHECK(samaya::verify_lp_optimality(model, result.col_value, result.row_dual).ok);
+        }
+      }
+    }
+  }
+  std::printf("  substitution differential: %d optimal, %d infeasible, %d unbounded; "
+              "%d LP, %d MILP (%d integer) eliminations (600 LPs + 600 MILPs, presolve on/off)\n",
+              optimal, infeasible, unbounded, lp_substitutions, mip_substitutions,
+              integer_substitutions);
+  CHECK(lp_substitutions >= 150);
+  CHECK(mip_substitutions >= 150);
+  CHECK(integer_substitutions >= 30);
+  CHECK(lp_instances >= 150);
+  CHECK(mip_instances >= 150);
+  std::printf("  substitution fired on %d/600 LPs and %d/600 MILPs\n", lp_instances, mip_instances);
+}
+
+
+TEST(presolve_substitution_doubletons_lp_and_rejected_mip) {
+  for (const bool mip : {false, true}) {
+    Model model;
+    model.obj = {1.0, -2.0, -0.5};
+    model.col_lower = {-2.0, -20.0, -2.0};
+    model.col_upper = {2.0, 20.0, 2.0};
+    model.col_type.assign(3, mip ? samaya::VarType::kInteger : samaya::VarType::kContinuous);
+    model.row_lower = {0.0, -kInf, -kInf, -kInf};
+    model.row_upper = {0.0, 1.0, 1.0, 1.0};
+    model.A = samaya::SparseMatrix::from_triplets(4, 3,
+        {{0, 0, 2.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 2, 1.0},
+         {2, 1, 1.0}, {2, 2, 1.0}, {3, 1, -1.0}, {3, 2, 1.0}});
+    Presolve p(model, substitution_options(mip, 1));
+    REQUIRE(p.run() == PresolveStatus::kReduced);
+    if (mip) {
+      CHECK_EQ(p.stats().doubleton_integer_cols, 0);
+      CHECK_EQ(p.stats().doubleton_rejected_divisibility, 1);
+      CHECK_EQ(p.stats().substitution_integer_cols, 1);
+      check_doubleton_reference(model, p, PresolveStatus::kReduced);
+    } else {
+      CHECK_EQ(p.stats().substitution_continuous_cols, 1);
+      check_implied_postsolve(model, p);
+    }
+  }
+}
+
+TEST(presolve_substitution_pivot_and_markowitz_choice) {
+  Model tiny = substitution_model(0.001);
+  tiny.col_lower[0] = -20000.0;
+  tiny.col_upper[0] = 20000.0;
+  Presolve rejected(tiny);
+  CHECK(!samaya::PresolveSubstitutionTestAccess::substitutions(rejected));
+  CHECK(rejected.stats().substitution_rejected_pivot > 0);
+  check_substitution_unchanged(tiny, rejected);
+  for (const bool shorter : {false, true}) {
+    Model model = substitution_model();
+    model.obj.assign(3, 0.0);
+    model.col_lower[0] = model.col_lower[1] = -kInf;
+    model.col_upper[0] = model.col_upper[1] = kInf;
+    model.A = samaya::SparseMatrix::from_triplets(4, 3,
+        {{0, 0, 1.0}, {0, 1, 2.0}, {0, 2, 1.0},
+         {1, 0, 1.0}, {1, 1, 1.0}, {1, 2, 1.0}, {2, shorter ? 0 : 1, 1.0}, {2, 2, -1.0},
+         {3, shorter ? 0 : 1, 1.0}, {3, 2, -1.0}});
+    Presolve p(model);
+    CHECK(samaya::PresolveSubstitutionTestAccess::substitutions(p));
+    CHECK_EQ(p.stats().substitution_continuous_cols, 1);
+    const Index removed = shorter ? 1 : 0;
+    CHECK(std::find(p.col_map().begin(), p.col_map().end(), removed) == p.col_map().end());
+    check_implied_postsolve(model, p);
+  }
+  // Equal column lengths choose the larger coefficient.
+  Model tied = substitution_model();
+  tied.obj.assign(3, 0.0);
+  tied.col_lower[0] = tied.col_lower[1] = -kInf;
+  tied.col_upper[0] = tied.col_upper[1] = kInf;
+  tied.A = samaya::SparseMatrix::from_triplets(3, 3,
+      {{0, 0, 1.0}, {0, 1, 2.0}, {0, 2, 1.0},
+       {1, 0, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}, {2, 2, -1.0}});
+  tied.row_lower.resize(3);
+  tied.row_upper.resize(3);
+  Presolve p(tied);
+  CHECK(samaya::PresolveSubstitutionTestAccess::substitutions(p));
+  CHECK(std::find(p.col_map().begin(), p.col_map().end(), 1) == p.col_map().end());
+  check_implied_postsolve(tied, p);
+}
+
+// 3x + y = 0 and 0.9x + 0.30000000000000004y in [-1, 1]: substituting x leaves y the coefficient
+// 0.30000000000000004 - 0.9/3, a few ulps of rounding noise. A row left with only such noise
+// turns into a wrong bound (random LP #866 of presolve_postsolve_restores_verified_optimal_
+// solutions was declared infeasible that way), so both C2 and C3 must skip the substitution.
+Model cancellation_model() {
+  Model model;
+  model.obj = {0.0, 1.0};
+  model.col_lower = {-kInf, -1.0};
+  model.col_upper = {kInf, 1.0};
+  model.col_type.assign(2, samaya::VarType::kContinuous);
+  model.row_lower = {0.0, -1.0};
+  model.row_upper = {0.0, 1.0};
+  model.A = samaya::SparseMatrix::from_triplets(2, 2,
+      {{0, 0, 3.0}, {0, 1, 1.0}, {1, 0, 0.9}, {1, 1, 0.1 + 0.2}});
+  return model;
+}
+
+TEST(presolve_substitution_rejects_cancelled_coefficient) {
+  const Model model = cancellation_model();
+  REQUIRE(0.1 + 0.2 - 0.9 * 1.0 / 3.0 != 0.0);  // The noise this test is about.
+  Presolve p(model);
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().substitution_continuous_cols, 0);
+  CHECK(p.stats().substitution_rejected_residual > 0);
+  check_implied_postsolve(model, p);
+}
+
+TEST(presolve_doubleton_rejects_cancelled_coefficient) {
+  const Model model = cancellation_model();
+  Presolve p(model, doubleton_options());
+  const PresolveStatus status = p.run();
+  REQUIRE(status == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().doubleton_continuous_cols, 0);
+  CHECK(p.stats().doubleton_rejected_residual > 0);
+  check_doubleton_reference(model, p, status);
 }

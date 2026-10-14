@@ -18,6 +18,9 @@ struct PresolveOptions {
   // Keep reductions valid for integer columns (exact divisibility for substitution, integral
   // bounds). Postsolve then restores primal values only.
   bool mip = false;
+  // Implied-free column substitution through equations (C3). Off only for A/B measurements
+  // and for tests that isolate an earlier rule.
+  bool substitute = true;
   int max_passes = 50;
 };
 
@@ -46,6 +49,17 @@ struct PresolveStats {
   Index doubleton_rejected_crossed_bounds = 0;
   Index doubleton_rejected_residual = 0;
   Index doubleton_rejected_nonfinite = 0;
+  Index substitution_continuous_cols = 0;
+  Index substitution_integer_cols = 0;
+  Index substitution_rejected_row_length = 0;
+  Index substitution_rejected_col_length = 0;
+  Index substitution_rejected_not_implied_free = 0;
+  Index substitution_rejected_by_tolerance = 0;
+  Index substitution_rejected_pivot = 0;
+  Index substitution_rejected_integer = 0;
+  Index substitution_rejected_nonfinite = 0;
+  Index substitution_rejected_residual = 0;
+  Index substitution_rejected_fill = 0;
 };
 
 // LP / MILP presolve: removes rows and columns, then maps a solution of
@@ -55,7 +69,8 @@ struct PresolveStats {
 // forcing and redundant rows (from row activity bounds), dominated columns (a column whose cost
 // and coefficients all push it to one finite bound is fixed there), free or implied-free column
 // singletons (substituted out of an equality row, or absorbing an inequality row when the column
-// has no cost), duplicate (parallel) rows and doubleton equations (MIP only).
+// has no cost), duplicate (parallel) rows, doubleton equations (MIP only), and implied-free
+// column substitution through equations with limited fill.
 //
 // Postsolve undoes the reductions in reverse order and restores primal values and, in LP mode,
 // row duals: each step keeps the solution optimal for the model as it was before that reduction,
@@ -80,6 +95,7 @@ class Presolve {
 
  private:
   friend struct PresolveTestAccess;
+  friend struct PresolveSubstitutionTestAccess;
   struct Entry {
     Index index;  // Column in rows_, row in cols_.
     double a;
@@ -93,6 +109,7 @@ class Presolve {
     kSlackCol,        // Free cost-free singleton column absorbing inequality `row`.
     kDuplicateRow,    // `row2` merged into `row` with a_row2 = factor * a_row.
     kDoubleton,       // MIP only: a * col + b * survivor = rhs_lower.
+    kSubstitution,    // Implied-free col solved from row and substituted through other rows.
   };
   struct Term {
     Index col;
@@ -120,6 +137,8 @@ class Presolve {
     // [first, last) in column_terms_ for singleton rows / doubletons, otherwise terms_.
     std::size_t first = 0;
     std::size_t last = 0;
+    std::size_t column_first = 0;  // Substitution: col snapshot excluding row.
+    std::size_t column_last = 0;
     Index survivor = -1;
     double b = 0.0;
     // Doubletons retain pre-transfer bounds and the staged post-substitution column and cost
@@ -160,6 +179,7 @@ class Presolve {
   bool process_singleton_cols(bool& changed);
   bool process_duplicate_rows(bool& changed);
   bool process_doubleton_rows(bool& changed);
+  bool process_substitutions(bool& changed);
   void build_reduced();
 
   const Model& model_;

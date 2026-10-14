@@ -136,6 +136,16 @@ void log_presolve_stats(const Logger& log, const PresolveStats& st) {
           st.doubleton_rejected_integer_data, st.doubleton_rejected_divisibility,
           st.doubleton_rejected_integer_bound, st.doubleton_rejected_crossed_bounds,
           st.doubleton_rejected_residual, st.doubleton_rejected_nonfinite);
+  log.log(2,
+          "Presolve substitutions: %d continuous, %d integer; rejected: %d row_length, "
+          "%d col_length, %d not_implied_free, %d by_tolerance, %d pivot, %d integer, "
+          "%d nonfinite, %d residual, %d fill",
+          st.substitution_continuous_cols, st.substitution_integer_cols,
+          st.substitution_rejected_row_length, st.substitution_rejected_col_length,
+          st.substitution_rejected_not_implied_free, st.substitution_rejected_by_tolerance,
+          st.substitution_rejected_pivot, st.substitution_rejected_integer,
+          st.substitution_rejected_nonfinite, st.substitution_rejected_residual,
+          st.substitution_rejected_fill);
 }
 
 bool solve_presolved_lp(const Model& model, const Params& requested, const Logger& log,

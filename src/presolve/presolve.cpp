@@ -15,9 +15,22 @@ namespace {
 constexpr double kSubstitutionPivotRatio = 0.01;
 // Prove redundant bounds with an outward allowance, rather than accepting a near miss.
 constexpr double kImpliedFreeErrorTol = 1e-12;
+// Reject ill-conditioned retained residuals; never approximate them by zero. Applied both
+// against the row's largest coefficient and against the operands of the update itself
+// (cancelled()): when old - term cancels to a few ulps of the operands, the computed result is
+// rounding noise, and a row left with only noise coefficients would turn into a wrong bound.
 constexpr double kSubstitutionResidualRatio = 1e-9;
+constexpr Index kSubstitutionRowLength = 10;  // Bound the first version's equation work.
+constexpr Index kSubstitutionColLength = 10;  // Bound the number of other rows updated.
+constexpr Index kSubstitutionFillLimit = 10;  // Follows HiGHS's default; not tuned.
 constexpr double kIntegerDataLimit = 2147483648.0;  // Exact integer arithmetic fits int64_t.
 constexpr double kBoundRoundoff = 4.0 * 0x1p-52;
+
+// True when the updated coefficient old - term is nonzero but tiny against its operands.
+bool cancelled(double old, double term, double result) {
+  return result != 0.0 &&
+         std::fabs(result) < kSubstitutionResidualRatio * (std::fabs(old) + std::fabs(term));
+}
 
 }  // namespace
 
@@ -701,8 +714,10 @@ bool Presolve::process_doubleton_rows(bool& changed) {
           largest = std::max(largest, std::fabs(f.a));
         }
       }
-      const double coefficient = old - e.a * b / a;
+      const double term = e.a * b / a;
+      const double coefficient = old - term;
       const double shift = e.a * c / a;
+      if (cancelled(old, term, coefficient)) residual = true;
       const double rl = std::isfinite(row_lower_[r]) ? row_lower_[r] - shift : row_lower_[r];
       const double ru = std::isfinite(row_upper_[r]) ? row_upper_[r] - shift : row_upper_[r];
       nonfinite = nonfinite || !std::isfinite(coefficient) || !std::isfinite(shift) ||
@@ -780,6 +795,191 @@ bool Presolve::process_doubleton_rows(bool& changed) {
   return true;
 }
 
+bool Presolve::process_substitutions(bool& changed) {
+  if (!options_.substitute) return true;
+  struct Update {
+    Index row;
+    std::vector<Entry> entries;
+    double lower;
+    double upper;
+  };
+  for (Index i = 0; i < m_; ++i) {
+    if (!row_active_[i] || row_count_[i] < 2 || row_lower_[i] != row_upper_[i]) continue;
+    if (row_count_[i] > kSubstitutionRowLength) {
+      ++stats_.substitution_rejected_row_length;
+      continue;
+    }
+    const double rhs = row_lower_[i];
+    std::vector<Entry> equation;
+    double largest = 0.0;
+    for (const auto& e : rows_[i]) {
+      if (!col_active_[e.index]) continue;
+      equation.push_back(e);
+      largest = std::max(largest, std::fabs(e.a));
+    }
+    Entry pivot{-1, 0.0};
+    const auto integer = [&](Index j) { return options_.mip && is_int(j); };
+    const auto prefer = [&](const Entry& e, const Entry& f) {
+      if (integer(e.index) != integer(f.index)) return !integer(e.index);
+      // Row length is shared, so comparing col lengths compares the Markowitz counts.
+      if (col_count_[e.index] != col_count_[f.index]) {
+        return col_count_[e.index] < col_count_[f.index];
+      }
+      return std::fabs(e.a) > std::fabs(f.a);
+    };
+    for (const auto& e : equation) {
+      if (col_count_[e.index] < 2) continue;  // C1 owns singletons.
+      if (col_count_[e.index] - 1 > kSubstitutionColLength) {
+        ++stats_.substitution_rejected_col_length;
+        continue;
+      }
+      if (!std::isfinite(e.a) || !std::isfinite(largest) || !std::isfinite(rhs)) {
+        ++stats_.substitution_rejected_nonfinite;
+        continue;
+      }
+      if (std::fabs(e.a) < kSubstitutionPivotRatio * largest) {
+        ++stats_.substitution_rejected_pivot;
+        continue;
+      }
+      if (integer(e.index)) {
+        const auto integral = [](double v) {
+          return std::fabs(v) <= kIntegerDataLimit && v == std::trunc(v);
+        };
+        bool valid = integral(e.a) && integral(rhs);
+        for (const auto& f : equation) {
+          if (f.index != e.index) valid = valid && is_int(f.index) && integral(f.a);
+        }
+        if (valid) {
+          const auto a = static_cast<std::int64_t>(e.a);
+          valid = static_cast<std::int64_t>(rhs) % a == 0;
+          for (const auto& f : equation) {
+            if (f.index != e.index) valid = valid && static_cast<std::int64_t>(f.a) % a == 0;
+          }
+        }
+        if (!valid) {
+          ++stats_.substitution_rejected_integer;
+          continue;
+        }
+      }
+      // Bounds can change between equations and passes: prove this candidate afresh.
+      bool tolerance_only = false;
+      if (!implied_free(i, e.index, e.a, tolerance_only)) {
+        if (tolerance_only) ++stats_.substitution_rejected_by_tolerance;
+        else ++stats_.substitution_rejected_not_implied_free;
+        continue;
+      }
+      if (pivot.index < 0 || prefer(e, pivot)) pivot = e;
+    }
+    if (pivot.index < 0) continue;
+    const Index x = pivot.index;
+    const double a = pivot.a;
+    std::vector<Update> updates;
+    Index fill = 0;
+    bool nonfinite = false, residual = false;
+    for (const auto& e : cols_[x]) {
+      const Index r = e.index;
+      if (r == i || !row_active_[r]) continue;
+      Update update{r, {}, row_lower_[r], row_upper_[r]};
+      for (const auto& f : rows_[r]) {
+        if (col_active_[f.index] && f.index != x) update.entries.push_back(f);
+      }
+      const double factor = e.a / a;
+      const double shift = factor * rhs;
+      nonfinite = nonfinite || !std::isfinite(factor) || !std::isfinite(shift);
+      if (std::isfinite(update.lower)) update.lower -= shift;
+      if (std::isfinite(update.upper)) update.upper -= shift;
+      nonfinite = nonfinite || (std::isfinite(row_lower_[r]) && !std::isfinite(update.lower)) ||
+          (std::isfinite(row_upper_[r]) && !std::isfinite(update.upper));
+      for (const auto& f : equation) {
+        if (f.index == x) continue;
+        const auto it = std::lower_bound(update.entries.begin(), update.entries.end(), f.index,
+            [](const Entry& g, Index j) { return g.index < j; });
+        const bool had_entry = it != update.entries.end() && it->index == f.index;
+        const double old = had_entry ? it->a : 0.0;
+        const double term = factor * f.a;
+        const double coefficient = old - term;
+        nonfinite = nonfinite || !std::isfinite(coefficient);
+        if (cancelled(old, term, coefficient)) residual = true;
+        if (had_entry) {
+          if (coefficient == 0.0) {
+            update.entries.erase(it);
+            --fill;
+          } else {
+            it->a = coefficient;
+          }
+        } else if (coefficient != 0.0) {
+          update.entries.insert(it, {f.index, coefficient});
+          ++fill;
+        }
+      }
+      double row_largest = 0.0;
+      for (const auto& f : update.entries) row_largest = std::max(row_largest, std::fabs(f.a));
+      for (const auto& f : update.entries) {
+        if (std::fabs(f.a) < kSubstitutionResidualRatio * row_largest) residual = true;
+      }
+      updates.push_back(std::move(update));
+    }
+    std::vector<Entry> costs;
+    const double cost_factor = cost_[x] / a;
+    const double new_offset = offset_ + cost_factor * rhs;
+    nonfinite = nonfinite || !std::isfinite(cost_factor) || !std::isfinite(new_offset);
+    for (const auto& e : equation) {
+      if (e.index == x) continue;
+      const double cost = cost_[e.index] - cost_factor * e.a;
+      costs.push_back({e.index, cost});
+      nonfinite = nonfinite || !std::isfinite(cost);
+    }
+    if (nonfinite) {
+      ++stats_.substitution_rejected_nonfinite;
+      continue;
+    }
+    if (residual) {
+      ++stats_.substitution_rejected_residual;
+      continue;
+    }
+    // Net growth excludes the removed pivot entries and the removed equation.
+    if (fill > kSubstitutionFillLimit) {
+      ++stats_.substitution_rejected_fill;
+      continue;
+    }
+    Record record{.kind = Kind::kSubstitution, .row = i, .col = x, .a = a,
+                  .cost = cost_[x], .rhs_lower = rhs};
+    record.first = terms_.size();
+    for (const auto& e : equation) {
+      if (e.index != x) terms_.push_back({e.index, e.a, cost_[e.index], 0.0, false});
+    }
+    record.last = terms_.size();
+    record.column_first = column_terms_.size();
+    for (const auto& e : cols_[x]) {
+      if (e.index != i && row_active_[e.index]) column_terms_.push_back(e);
+    }
+    record.column_last = column_terms_.size();
+    records_.push_back(record);  // Save both original snapshots before any mutation.
+    for (const auto& u : updates) {
+      for (const auto& e : equation) {
+        if (e.index == x) continue;
+        const auto it = std::lower_bound(u.entries.begin(), u.entries.end(), e.index,
+            [](const Entry& f, Index j) { return f.index < j; });
+        const double coefficient = it != u.entries.end() && it->index == e.index ? it->a : 0.0;
+        if (!change_coefficient(u.row, e.index, coefficient) && coefficient != 0.0) {
+          add_entry(u.row, e.index, coefficient);
+        }
+      }
+      remove_entry(u.row, x);
+      row_lower_[u.row] = u.lower;
+      row_upper_[u.row] = u.upper;
+    }
+    for (const auto& e : costs) cost_[e.index] = e.a;
+    offset_ = new_offset;
+    remove_row(i);
+    remove_col(x);
+    if (integer(x)) ++stats_.substitution_integer_cols;
+    else ++stats_.substitution_continuous_cols;
+    changed = true;
+  }
+  return true;
+}
+
 PresolveStatus Presolve::run() {
   for (Index j = 0; j < n_; ++j) {
     if (is_int(j) && !set_bounds(j, lower_[j], upper_[j])) return PresolveStatus::kInfeasible;
@@ -787,7 +987,8 @@ PresolveStatus Presolve::run() {
   for (int pass = 0; pass < options_.max_passes; ++pass) {
     bool changed = false;
     if (!process_rows(changed) || !process_cols(changed) || !process_singleton_cols(changed) ||
-        !process_duplicate_rows(changed) || !process_doubleton_rows(changed)) {
+        !process_duplicate_rows(changed) || !process_doubleton_rows(changed) ||
+        !process_substitutions(changed)) {
       return PresolveStatus::kInfeasible;
     }
     ++stats_.passes;
@@ -913,6 +1114,15 @@ void Presolve::postsolve(const std::vector<double>& reduced_x,
       case Kind::kDoubleton:
         x[r.col] = (r.rhs_lower - r.b * x[r.survivor]) / r.a;
         break;
+      case Kind::kSubstitution: {
+        double s = 0.0;
+        for (std::size_t t = r.first; t < r.last; ++t) s += terms_[t].a * x[terms_[t].col];
+        x[r.col] = (r.rhs_lower - s) / r.a;
+        // y_e = (c_x - sum a_rx y_r) / a makes d_x = 0; transferred costs and row
+        // coefficients cancel in d_k = c_k - sum a_rk y_r - a_ek y_e for every other k.
+        if (duals) y[r.row] = reduced_cost(r.column_first, r.column_last, r.cost) / r.a;
+        break;
+      }
       case Kind::kSlackCol: {
         double s = 0.0;
         for (std::size_t t = r.first; t < r.last; ++t) s += terms_[t].a * x[terms_[t].col];

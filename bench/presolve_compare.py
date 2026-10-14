@@ -38,6 +38,13 @@ DOUBLETON_COUNTERS = ["doubleton_continuous_cols", "doubleton_integer_cols",
                       "doubleton_rejected_crossed_bounds", "doubleton_rejected_residual",
                       "doubleton_rejected_nonfinite"]
 COUNTERS += DOUBLETON_COUNTERS
+SUBSTITUTION_COUNTERS = ["substitution_continuous_cols", "substitution_integer_cols",
+                         "substitution_rejected_row_length", "substitution_rejected_col_length",
+                         "substitution_rejected_not_implied_free", "substitution_rejected_by_tolerance",
+                         "substitution_rejected_pivot", "substitution_rejected_integer",
+                         "substitution_rejected_nonfinite", "substitution_rejected_residual",
+                         "substitution_rejected_fill"]
+COUNTERS += SUBSTITUTION_COUNTERS
 SIZES = ["rows", "cols", "integers", "nonzeros"]
 FIELDS = (["instance"] + [f"original_{s}" for s in SIZES]
           + ["samaya_status", "samaya_solve_status", "samaya_seconds", "samaya_wall_seconds"]
@@ -76,6 +83,14 @@ def parse_samaya(text: str) -> dict:
     if doubletons:
         result.update(zip([f"samaya_{c}" for c in DOUBLETON_COUNTERS],
                           map(int, doubletons.groups())))
+    # Older binaries omit this line; their substitution fields stay blank.
+    substitutions = re.search(r"Presolve substitutions: (\d+) continuous, (\d+) integer; rejected: "
+                              r"(\d+) row_length, (\d+) col_length, (\d+) not_implied_free, "
+                              r"(\d+) by_tolerance, (\d+) pivot, (\d+) integer, "
+                              r"(\d+) nonfinite, (\d+) residual, (\d+) fill", text)
+    if substitutions:
+        result.update(zip([f"samaya_{c}" for c in SUBSTITUTION_COUNTERS],
+                          map(int, substitutions.groups())))
     if "Presolve: infeasib" in line:
         result["samaya_status"] = "infeasible"
         passes = re.search(r"passes (\d+)", line)
@@ -273,6 +288,19 @@ def self_test() -> None:
                         + doubletons)
     assert [mip[f"samaya_{c}"] for c in DOUBLETON_COUNTERS] == list(range(13, 22))
     assert mip["samaya_implied_free_rejected_by_tolerance"] == 12
+    assert all(f"samaya_{c}" not in mip for c in SUBSTITUTION_COUNTERS)
+    substitutions = ("Presolve substitutions: 22 continuous, 23 integer; rejected: 24 row_length, "
+                     "25 col_length, 26 not_implied_free, 27 by_tolerance, 28 pivot, 29 integer, "
+                     "30 nonfinite, 31 residual, 32 fill\n")
+    for mode in ("Presolve: 20 rows, 30 cols (15 integer) -> 4 rows, 5 cols (3 integer); "
+                 "nonzeros 80 -> 9; passes 2; presolve_seconds 0.001\n",
+                 "Presolve: 20 rows, 30 cols -> 4 rows, 5 cols, 9 nonzeros (2 passes); "
+                 "original_nonzeros 80; presolve_seconds 0.001\n",
+                 "Presolve: infeasible; presolve_seconds 0.001; passes 2\n"):
+        parsed = parse_samaya(mode + counters + doubletons + substitutions)
+        assert [parsed[f"samaya_{c}"] for c in SUBSTITUTION_COUNTERS] == list(range(22, 33))
+        assert [parsed[f"samaya_{c}"] for c in DOUBLETON_COUNTERS] == list(range(13, 22))
+        assert parsed["samaya_implied_free_rejected_by_tolerance"] == 12
     lp = parse_samaya("Presolve: 20 rows, 30 cols -> 4 rows, 5 cols, 9 nonzeros (2 passes); "
                        "original_nonzeros 80; presolve_seconds 2e-3\n" + counters)
     assert lp["samaya_status"] == "reduced" and lp["samaya_integers"] == 0
@@ -289,7 +317,7 @@ def self_test() -> None:
     assert parse_samaya("Presolve: 2 rows, 3 cols (1 integer) -> 1 rows, 2 cols (1 integer)")["samaya_status"] == "failed"
     assert parse_samaya("Presolve: 20 rows, 30 cols -> 4 rows, 5 cols, 9 nonzeros (2 passes); "
                         "original_nonzeros 80; presolve_seconds 0.1")["samaya_status"] == "failed"
-    print("self-test: PASS (LP, MIP, C1 counters, infeasibility, missing and legacy logs)")
+    print("self-test: PASS (LP, MIP, C1/C2/C3 counters, infeasibility, missing and legacy logs)")
 
 
 def main() -> int:
