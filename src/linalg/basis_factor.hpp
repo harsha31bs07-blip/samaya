@@ -40,7 +40,7 @@ class BasisFactor {
  public:
   enum class RebuildReason : std::uint8_t {
     kInitial, kPhase, kInterval, kFillLimit, kUnsafeUpdate, kMismatch,
-    kNumerical, kConfirmation, kRankRepair, kCount
+    kNumerical, kConfirmation, kRankRepair, kUpdateWork, kCount
   };
   struct Stats {
     long long rebuilds = 0;  // Factorization attempts, including rank-repair retries.
@@ -55,7 +55,15 @@ class BasisFactor {
     double abs_pivot_tol = 1e-11;  // Smaller pivots count as zero (rank deficiency).
     double drop_tol = 1e-14;       // Fill-in below this magnitude is dropped.
     int search_limit = 4;          // Markowitz search stops after this many candidate lines.
-    int max_updates = 100;         // Refactorization interval.
+    int max_updates = 100;         // Refactorization interval (an upper bound with rebuild_cost).
+    // Amortized refactorization: rebuild once the extra solve work caused by the updates since
+    // the last factorization (3 solves per iteration over the entries added to R and U) exceeds
+    // the estimated cost of a factorization, rebuild_cost x its factor entries in units of one
+    // solve's cost per entry. Step-0 profiles (SIMPLEX_SPEED_PLAN.md) measured that ratio at
+    // about 70 on most Netlib models and 150-340 on the large ones (pilot, pilot87, fit2p, the
+    // 467k-row LP); the cost near the optimal interval is flat (the interval goes with the square
+    // root of the ratio), so one constant serves. 0 disables the rule.
+    double rebuild_cost = 200.0;
     bool collect_stats = false;
   };
 
@@ -87,6 +95,7 @@ class BasisFactor {
 
   int num_updates() const { return num_updates_; }
   bool should_refactor() const;
+  bool update_work_exceeds_rebuild() const;
   Index rows() const { return m_; }
   NnzIndex factor_nnz() const;
   RebuildReason refactor_reason() const;
@@ -137,6 +146,7 @@ class BasisFactor {
   NnzIndex initial_nnz_ = 0;
 
   int num_updates_ = 0;
+  double extra_solve_work_ = 0.0;  // Accumulated solve entries added by updates (see Options).
   bool valid_ = false;
   std::vector<Index> singular_positions_;
   std::vector<Index> unpivoted_rows_;

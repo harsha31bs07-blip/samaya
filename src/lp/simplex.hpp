@@ -84,7 +84,11 @@ struct SimplexOptions {
   long long max_iterations = -1;  // -1: automatic, proportional to the problem size.
   double time_limit = kInf;
   bool perturb = true;
-  int refactor_interval = 100;
+  // Upper bound on updates between factorizations; the amortized rule (BasisFactor::Options::
+  // rebuild_cost) usually refactorizes earlier. On the 467k-row LP intervals of 100, 300 and
+  // 1000 gave 35.4, 28.7 and 26.4 ms per iteration with no numerical rebuilds (step 2 in
+  // SIMPLEX_SPEED_PLAN.md).
+  int refactor_interval = 2000;
   std::uint64_t seed = 1;
   bool collect_stats = false;  // Detailed counters/timing; also enabled automatically at log level 2.
   int timing_sample_interval = 32;  // 1: time every iteration; counters/densities are always exact.

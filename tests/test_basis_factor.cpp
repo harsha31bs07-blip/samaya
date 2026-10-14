@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <random>
 #include <vector>
 
@@ -162,6 +163,53 @@ TEST(factor_forrest_tomlin_updates_match_dense) {
   }
   CHECK(updates_done > 500);
   CHECK(refactors > 0);
+}
+
+TEST(factor_amortized_rebuild_after_enough_update_work) {
+  // Same update sequence under three settings: the update-work rule fires earlier for a cheaper
+  // rebuild, never when disabled, and the factor stays exact up to that point.
+  int first_due[3] = {0, 0, 0};
+  const double costs[3] = {0.5, 2.0, 0.0};
+  for (int c = 0; c < 3; ++c) {
+    std::mt19937 rng(11);
+    const int m = 40;
+    const int n = 2 * m;
+    const SparseMatrix a = random_matrix(m, n, 4.0 / m, rng);
+    BasisFactor::Options options;
+    options.max_updates = 1000000;
+    options.rebuild_cost = costs[c];
+    BasisFactor f(a, options);
+    std::vector<Index> basic = random_basis(a, f, rng);
+    int updates = 0;
+    // At most 60 updates: long random update sequences without refactorization lose the 1e-9
+    // accuracy check_solves demands (the simplex refactorizes on a pivot mismatch first).
+    constexpr int kMaxUpdates = 60;
+    for (int it = 0; it < 1000 && updates < kMaxUpdates && first_due[c] == 0; ++it) {
+      const Index j = static_cast<Index>(rng() % (n + m));
+      if (std::find(basic.begin(), basic.end(), j) != basic.end()) continue;
+      std::vector<double> alpha = column(a, j);
+      std::vector<double> spike;
+      f.ftran(alpha, &spike);
+      const Index r = static_cast<Index>(rng() % m);
+      if (std::fabs(alpha[r]) < 1e-2 * max_abs(alpha)) continue;
+      basic[r] = j;
+      REQUIRE(f.update(r, spike));
+      ++updates;
+      check_solves(f, dense_basis(a, basic), rng);
+      if (f.update_work_exceeds_rebuild()) {
+        first_due[c] = updates;
+        CHECK(f.should_refactor());
+        // The fill safeguard has priority when both fire; the interval cannot (no cap here).
+        CHECK(f.refactor_reason() == BasisFactor::RebuildReason::kUpdateWork ||
+              f.refactor_reason() == BasisFactor::RebuildReason::kFillLimit);
+      }
+    }
+  }
+  std::printf("  update-work rebuild due after %d (cost 0.5) and %d (cost 2) updates\n",
+              first_due[0], first_due[1]);
+  CHECK(first_due[0] > 0);
+  CHECK(first_due[1] > first_due[0]);
+  CHECK_EQ(first_due[2], 0);
 }
 
 TEST(factor_detects_rank_deficiency) {

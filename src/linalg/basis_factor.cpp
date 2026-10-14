@@ -83,6 +83,7 @@ void BasisFactor::clear() {
   order_slot_.assign(m, -1);
   u_nnz_ = 0;
   num_updates_ = 0;
+  extra_solve_work_ = 0.0;
   valid_ = false;
   singular_positions_.clear();
   unpivoted_rows_.clear();
@@ -332,12 +333,20 @@ NnzIndex BasisFactor::factor_nnz() const {
 }
 
 bool BasisFactor::should_refactor() const {
-  return num_updates_ >= options_.max_updates || factor_nnz() > 3 * initial_nnz_ + m_;
+  return num_updates_ >= options_.max_updates || factor_nnz() > 3 * initial_nnz_ + m_ ||
+         update_work_exceeds_rebuild();
+}
+
+bool BasisFactor::update_work_exceeds_rebuild() const {
+  return options_.rebuild_cost > 0.0 &&
+         extra_solve_work_ >= options_.rebuild_cost * static_cast<double>(initial_nnz_);
 }
 
 BasisFactor::RebuildReason BasisFactor::refactor_reason() const {
-  // Match the short-circuit priority of should_refactor() when both safeguards fire.
-  return num_updates_ >= options_.max_updates ? RebuildReason::kInterval : RebuildReason::kFillLimit;
+  // Match the short-circuit priority of should_refactor() when several rules fire.
+  if (num_updates_ >= options_.max_updates) return RebuildReason::kInterval;
+  if (factor_nnz() > 3 * initial_nnz_ + m_) return RebuildReason::kFillLimit;
+  return RebuildReason::kUpdateWork;
 }
 
 void BasisFactor::ftran(std::vector<double>& x, std::vector<double>* spike,
@@ -464,6 +473,11 @@ bool BasisFactor::update(Index r, const std::vector<double>& spike) {
   order_slot_[r] = static_cast<Index>(order_.size());
   order_.push_back(r);
   ++num_updates_;
+  // Every later iteration's solves (BTRAN, entering FTRAN, DSE FTRAN) also pass the entries
+  // that the updates so far added to the factor.
+  constexpr double kSolvesPerIteration = 3.0;
+  const NnzIndex added = factor_nnz() - initial_nnz_;
+  if (added > 0) extra_solve_work_ += kSolvesPerIteration * static_cast<double>(added);
   valid_ = true;
   return true;
 }

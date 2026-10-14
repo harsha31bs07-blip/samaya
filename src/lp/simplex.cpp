@@ -1124,7 +1124,7 @@ void Simplex::finish_profile() {
   count_row("CHUZR infeasibility list", stats_.chuzr_list);
   constexpr const char* reasons[] = {
       "initial", "phase", "interval", "fill_limit", "unsafe_update", "mismatch", "numerical",
-      "confirmation", "rank_repair"};
+      "confirmation", "rank_repair", "update_work"};
   log_.log(2, "  factor rebuilds=%lld factorize_s=%.6f max_factorize_s=%.6f "
               "max_rebuild_recompute_s=%.6f rank_repairs=%lld",
            stats_.factor.rebuilds, stats_.factor.rebuild_seconds,
