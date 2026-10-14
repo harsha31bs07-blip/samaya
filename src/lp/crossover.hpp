@@ -8,19 +8,34 @@
 
 namespace samaya {
 
+struct CrossoverStats {
+  Index basic_structurals = 0;
+  Index basic_equality_logicals = 0;
+  Index basic_other_logicals = 0;
+  Index basic_fixed_structurals = 0;  // Subset of basic_structurals.
+  Index repairs = 0;  // Positions replaced across all attempts.
+  int factorizations = 0;
+  Index rank_deficiency = 0;  // From the last factorization; zero on success.
+  double factorization_seconds = 0.0;
+};
+
 // Crossover: a simplex basis guessed from a primal-dual point of an LP, e.g. the answer of the
 // interior-point method or of PDLP (ARCHITECTURE.md WP3 M5).
 //
 // Returns n + m statuses in the computational form of make_problem (the structural columns, then
-// the row activities), exactly m of them basic, for Simplex::solve(statuses). The simplex then
-// finishes the job: it repairs a rank-deficient guess with logicals, and its iterations take the
-// basis to a verified vertex. A good guess makes that a short cleanup instead of a full solve.
+// the row activities), exactly m of them basic, for Simplex::solve(statuses). The selected basis
+// is repaired with logicals to factorize without rank deficiency in the original model's space.
+// Repairs stop after four factorizations or if an entering logical is already basic, leaving any
+// remaining deficiency to the simplex. The simplex factorizes a scaled copy, so it can still
+// occasionally repair the basis; its iterations take the basis to a verified vertex.
 //
 // x are the column values and y the row duals in the convention of verify_lp_optimality
 // (d = c - A'y). Each variable gets a score for being basic from its distance to its nearest
 // bound against the size of its reduced cost: near an optimum, complementary slackness makes one
-// of the two close to zero. The m best are basic; the others sit at their nearest bound.
+// of the two close to zero. The m best are initially basic; the others, including columns leaving
+// during rank repair, sit at the bound nearest to their value in the supplied point.
 std::vector<VarStatus> crossover_basis(const Model& model, std::span<const double> x,
-                                       std::span<const double> y);
+                                       std::span<const double> y,
+                                       CrossoverStats* stats = nullptr);
 
 }  // namespace samaya

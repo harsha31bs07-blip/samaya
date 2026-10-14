@@ -7,6 +7,7 @@
 #include <random>
 
 #include "core/log.hpp"
+#include "linalg/basis_factor.hpp"
 #include "lp/crossover.hpp"
 #include "lp/ipm.hpp"
 #include "lp/lp_solver.hpp"
@@ -30,7 +31,137 @@ namespace {
 
 bool close(double a, double b) { return std::fabs(a - b) <= 1e-6 * (1.0 + std::fabs(b)); }
 
+std::vector<Index> basic_variables(const std::vector<VarStatus>& status) {
+  std::vector<Index> basic;
+  for (Index j = 0; j < static_cast<Index>(status.size()); ++j) {
+    if (status[j] == VarStatus::kBasic) basic.push_back(j);
+  }
+  return basic;
+}
+
 }  // namespace
+
+TEST(crossover_repairs_dependent_columns_at_the_point_nearest_bound) {
+  // Match the simplex's default primal tolerance when checking the equality objective.
+  constexpr double kObjectiveTolerance = 1e-7;
+  Model model;
+  model.A = samaya::SparseMatrix::from_triplets(2, 2,
+      {{0, 0, 1.0}, {1, 0, 1.0}, {0, 1, 1.0}, {1, 1, 1.0}});
+  model.obj = {1.0, 1.0};
+  model.col_lower = {0.0, 0.0};
+  model.col_upper = {10.0, 10.0};
+  model.col_type.assign(2, samaya::VarType::kContinuous);
+  model.row_lower = {18.0, 0.0};
+  model.row_upper = {18.0, 18.0};
+  const std::vector<double> x = {9.0, 9.0};
+  const std::vector<double> y = {1.0, 0.0};
+
+  // Both identical structurals score 1, both logicals score 0. Either leaving structural is
+  // nearer its upper bound at this point; a fresh simplex's zero would instead choose lower.
+  samaya::BasisFactor factor(model.A);
+  const std::vector<Index> selected = {0, 1};
+  REQUIRE(factor.factorize(selected) == 1);
+  const Index leaving = selected[factor.singular_positions()[0]];
+  const Index row = factor.unpivoted_rows()[0];
+  samaya::CrossoverStats stats;
+  const std::vector<VarStatus> status = samaya::crossover_basis(model, x, y, &stats);
+  const std::vector<Index> basic = basic_variables(status);
+  CHECK_EQ(basic.size(), static_cast<std::size_t>(model.num_rows()));
+  CHECK_EQ(factor.factorize(basic), 0);
+  CHECK(status[leaving] == VarStatus::kAtUpper);
+  CHECK(status[model.num_cols() + row] == VarStatus::kBasic);
+  CHECK_EQ(stats.basic_structurals, 1);
+  CHECK_EQ(stats.basic_equality_logicals, row == 0 ? 1 : 0);
+  CHECK_EQ(stats.basic_other_logicals, row == 1 ? 1 : 0);
+  CHECK_EQ(stats.basic_fixed_structurals, 0);
+  CHECK_EQ(stats.repairs, 1);
+  CHECK_EQ(stats.factorizations, 2);
+  CHECK_EQ(stats.rank_deficiency, 0);
+  CHECK(stats.factorization_seconds >= 0.0);
+  CHECK(samaya::crossover_basis(model, x, y) == status);
+
+  const samaya::Logger quiet(0);
+  const samaya::LpProblem lp = samaya::make_problem(model, samaya::Scaling::identity(2, 2));
+  samaya::SimplexOptions options;
+  options.collect_stats = true;
+  samaya::Simplex simplex(lp, options, quiet);
+  REQUIRE(simplex.solve(status) == SimplexStatus::kOptimal);
+  CHECK_EQ(simplex.stats().warm_start_rank_repairs, 0);
+  CHECK(samaya::verify_lp_optimality(model,
+      std::span<const double>(simplex.values()).first(2), simplex.duals()).ok);
+  CHECK_NEAR(simplex.values()[0] + simplex.values()[1], 18.0, kObjectiveTolerance);
+}
+
+TEST(crossover_from_reference_and_perturbed_optima_has_full_rank) {
+  std::mt19937 rng(305);
+  const samaya::Logger quiet(0);
+  // A small primal-dual perturbation models an approximate point without changing LP data.
+  constexpr double kPointPerturbation = 1e-5;
+  // Crossover uses the same factorization cap as Simplex::rebuild.
+  constexpr int kMaxFactorizations = 4;
+  std::uniform_real_distribution<double> perturb(-kPointPerturbation, kPointPerturbation);
+  int checked = 0;
+  samaya::CrossoverStats stats;
+  for (const LpFamily family : {LpFamily::kFeasible, LpFamily::kRandom, LpFamily::kDegenerate,
+                                LpFamily::kBoxed, LpFamily::kLoose}) {
+    for (int k = 0; k < 60; ++k) {
+      const Model model = samaya::test::random_lp(family, 12, 12, rng);
+      const ReferenceResult ref = ReferenceLp(model).solve();
+      if (ref.status != ReferenceResult::Status::kOptimal) continue;
+      // The independent reference supplies x only; obtain compatible optimal row duals from a
+      // verified simplex solve. Any optimal primal and dual pair satisfies complementarity.
+      const LpResult optimum = samaya::solve_lp(model, {}, quiet);
+      REQUIRE(optimum.status == SimplexStatus::kOptimal);
+      REQUIRE(close(optimum.objective, ref.objective));
+      REQUIRE(samaya::verify_lp_optimality(model, ref.x, optimum.row_dual).ok);
+      for (const bool perturbed : {false, true}) {
+        std::vector<double> x = ref.x;
+        std::vector<double> y = optimum.row_dual;
+        if (perturbed) {
+          for (double& value : x) value += perturb(rng) * (1.0 + std::fabs(value));
+          for (double& value : y) value += perturb(rng) * (1.0 + std::fabs(value));
+        }
+        const std::vector<VarStatus> status = samaya::crossover_basis(model, x, y, &stats);
+        const std::vector<Index> basic = basic_variables(status);
+        CHECK_EQ(basic.size(), static_cast<std::size_t>(model.num_rows()));
+        samaya::BasisFactor factor(model.A);
+        CHECK_EQ(factor.factorize(basic), 0);
+        CHECK_EQ(stats.rank_deficiency, 0);
+        CHECK(stats.factorizations >= 1 && stats.factorizations <= kMaxFactorizations);
+        CHECK(stats.factorization_seconds >= 0.0);
+        Index structurals = 0, equality_logicals = 0, other_logicals = 0, fixed = 0;
+        for (const Index j : basic) {
+          if (j < model.num_cols()) {
+            ++structurals;
+            if (model.col_lower[j] == model.col_upper[j]) ++fixed;
+          } else if (model.row_lower[j - model.num_cols()] == model.row_upper[j - model.num_cols()]) {
+            ++equality_logicals;
+          } else {
+            ++other_logicals;
+          }
+        }
+        CHECK_EQ(stats.basic_structurals, structurals);
+        CHECK_EQ(stats.basic_equality_logicals, equality_logicals);
+        CHECK_EQ(stats.basic_other_logicals, other_logicals);
+        CHECK_EQ(stats.basic_fixed_structurals, fixed);
+
+        LpSolveOptions options;
+        options.start = status;
+        options.scale = false;
+        options.simplex.collect_stats = true;
+        const LpResult warm = samaya::solve_lp(model, options, quiet);
+        REQUIRE(warm.status == SimplexStatus::kOptimal);
+        CHECK_EQ(warm.stats.warm_start_rank_repairs, 0);
+        CHECK(close(warm.objective, ref.objective));
+        CHECK(samaya::verify_lp_optimality(model, warm.col_value, warm.row_dual).ok);
+        ++checked;
+      }
+    }
+  }
+  std::printf("  %d reference and perturbed points: full-rank bases and verified warm optima\n",
+              checked);
+  CHECK(checked > 300);
+}
 
 TEST(crossover_basis_has_m_basic_variables_on_valid_sides) {
   std::mt19937 rng(301);

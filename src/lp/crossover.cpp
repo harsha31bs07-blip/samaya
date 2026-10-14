@@ -5,9 +5,14 @@
 #include <cmath>
 #include <numeric>
 
+#include "linalg/basis_factor.hpp"
+
 namespace samaya {
 
 namespace {
+
+// Match Simplex::rebuild's cap so crossover cannot spend indefinitely on numerical repairs.
+constexpr int kMaxFactorizations = 4;
 
 // Distances and reduced costs are compared relative to the size of the value and of the cost,
 // so that the score does not depend on the units of a column or a row.
@@ -29,7 +34,7 @@ VarStatus nearest_bound(double value, double lower, double upper) {
 }  // namespace
 
 std::vector<VarStatus> crossover_basis(const Model& model, std::span<const double> x,
-                                       std::span<const double> y) {
+                                       std::span<const double> y, CrossoverStats* stats) {
   const Index m = model.num_rows();
   const Index n = model.num_cols();
   assert(x.size() == static_cast<std::size_t>(n) && y.size() == static_cast<std::size_t>(m));
@@ -86,6 +91,53 @@ std::vector<VarStatus> crossover_basis(const Model& model, std::span<const doubl
   for (Index k = 0; k < nt; ++k) {
     const Index j = order[k];
     status[j] = k < m ? VarStatus::kBasic : nearest_bound(value[j], lower[j], upper[j]);
+  }
+
+  // Use the same variable order as the simplex warm start, and check independence before the
+  // point values are lost. A repair's leaving variable must use this point, not a fresh zero.
+  std::vector<Index> basic;
+  basic.reserve(static_cast<std::size_t>(m));
+  for (Index j = 0; j < nt; ++j) {
+    if (status[j] == VarStatus::kBasic) basic.push_back(j);
+  }
+  CrossoverStats measurements;
+  BasisFactor::Options options;
+  options.collect_stats = stats != nullptr;
+  BasisFactor factor(model.A, options);
+  for (int attempt = 0; attempt < kMaxFactorizations; ++attempt) {
+    ++measurements.factorizations;
+    measurements.rank_deficiency = factor.factorize(basic);
+    if (measurements.rank_deficiency == 0 || attempt + 1 == kMaxFactorizations) break;
+    const auto& positions = factor.singular_positions();
+    const auto& rows = factor.unpivoted_rows();
+    bool stopped = false;
+    for (std::size_t k = 0; k < positions.size(); ++k) {
+      const Index entering = n + rows[k];
+      if (status[entering] == VarStatus::kBasic) {
+        stopped = true;
+        break;
+      }
+      const Index leaving = basic[positions[k]];
+      status[leaving] = nearest_bound(value[leaving], lower[leaving], upper[leaving]);
+      basic[positions[k]] = entering;
+      status[entering] = VarStatus::kBasic;
+      ++measurements.repairs;
+    }
+    if (stopped) break;
+  }
+  if (stats != nullptr) {
+    for (const Index j : basic) {
+      if (j < n) {
+        ++measurements.basic_structurals;
+        if (lower[j] == upper[j]) ++measurements.basic_fixed_structurals;
+      } else if (lower[j] == upper[j]) {
+        ++measurements.basic_equality_logicals;
+      } else {
+        ++measurements.basic_other_logicals;
+      }
+    }
+    measurements.factorization_seconds = factor.stats().rebuild_seconds;
+    *stats = measurements;
   }
   return status;
 }

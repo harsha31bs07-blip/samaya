@@ -35,6 +35,14 @@ constexpr double kPdlpCrossoverTolerance = 1e-4;
 // The automatic crossover iteration cap is 2 (rows + columns), and at least this.
 constexpr long long kCrossoverMinIterations = 10000;
 
+void log_crossover_stats(const CrossoverStats& stats, const Logger& log) {
+  log.log(2, "Crossover basis: %d structural, %d equality logicals, %d other logicals, %d fixed; "
+             "repairs %d in %d factorizations, deficiency %d, %.3f s",
+          stats.basic_structurals, stats.basic_equality_logicals, stats.basic_other_logicals,
+          stats.basic_fixed_structurals, stats.repairs, stats.factorizations,
+          stats.rank_deficiency, stats.factorization_seconds);
+}
+
 Status to_status(SimplexStatus s) {
   switch (s) {
     case SimplexStatus::kOptimal: return Status::kOptimal;
@@ -244,7 +252,11 @@ bool solve_barrier_lp(const Model& model, const Params& params, const Logger& lo
   }
   // The crossover basis is guessed from the last iterate, whose distances to the bounds still
   // show which variables are basic.
-  if (params.crossover) start = crossover_basis(model, ipm.x, ipm.y);
+  if (params.crossover) {
+    CrossoverStats stats;
+    start = crossover_basis(model, ipm.x, ipm.y, &stats);
+    log_crossover_stats(stats, log);
+  }
   // The last iterate first; the polished point if the iterate does not pass.
   VerifyReport report = verify_lp_optimality(model, ipm.x, ipm.y);
   if (report.ok || !params.verify) {
@@ -265,7 +277,11 @@ bool solve_barrier_lp(const Model& model, const Params& params, const Logger& lo
   }
   log.log(1, "Barrier: point failed verification (%s); crossover to the dual simplex",
           report.message.c_str());
-  if (start.empty()) start = crossover_basis(model, ipm.x, ipm.y);
+  if (start.empty()) {
+    CrossoverStats stats;
+    start = crossover_basis(model, ipm.x, ipm.y, &stats);
+    log_crossover_stats(stats, log);
+  }
   return false;
 }
 
@@ -402,7 +418,9 @@ bool solve_pdlp_lp(const Model& model, const Params& params, const Logger& log, 
   const bool has_point = lp.status == SimplexStatus::kOptimal &&
                          lp.col_value.size() == static_cast<std::size_t>(n);
   if (has_point && (params.crossover || !verified)) {
-    start = crossover_basis(model, lp.col_value, lp.row_dual);
+    CrossoverStats stats;
+    start = crossover_basis(model, lp.col_value, lp.row_dual, &stats);
+    log_crossover_stats(stats, log);
   }
   if (!verified) {
     log.log(1, "PDLP: %s%s; %s", to_string(lp.status), answered ? " failed verification" : "",
