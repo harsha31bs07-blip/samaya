@@ -66,6 +66,7 @@ struct SimplexStats {
   MeasurementCount rho_nnz, alpha_col_nnz, tau_nnz, flip_rhs_nnz;
   MeasurementCount ratio_candidates, harris_groups;  // Dual ratio-test calls, including retries.
   MeasurementCount chuzr_list;  // Length of the infeasibility list at each CHUZR.
+  long long chuzr_scans = 0;    // CHUZRs that scanned all m rows instead (dense updates).
   BasisFactor::Stats factor;
   std::array<double, static_cast<std::size_t>(Component::kCount)> seconds{};
   // Raw sampled component seconds; seconds above contains the estimates at solve completion.
@@ -95,6 +96,10 @@ struct SimplexOptions {
   // CHUZR scans all m basic rows instead of the infeasibility list. The two choose the same row
   // (ties go to the lowest position in both); the scan is the reference of the equivalence tests.
   bool chuzr_full_scan = false;
+  // The list is kept only while the primal updates since the last recomputation averaged at most
+  // this fraction of m nonzeros; denser updates scan instead (both choose the same row). 1 keeps
+  // the list always (tests); see Simplex::rebuild_infeasible_list for the measurements.
+  double chuzr_list_max_density = 0.1;
 };
 
 // Bounded dual simplex with dual steepest-edge pricing, a Harris two-pass ratio test, cost
@@ -175,6 +180,9 @@ class Simplex {
   bool primal_infeasible(Index j) const;
   void rebuild_infeasible_list();
   void note_basic_change(Index position);
+  // x_[basic_[k]] -= scale * delta[k] for every position k; in list mode, lists the changed ones
+  // that become primal infeasible. Counts the update's nonzeros for the mode choice.
+  void update_basic_values(const std::vector<double>& delta, double scale);
   Index dual_ratio_test(double direction, double slope);
   void apply_flips();
   Index choose_entering_column() const;
@@ -221,6 +229,9 @@ class Simplex {
   // date for each position whose value changes in the dual loop.
   std::vector<Index> infeasible_;
   std::vector<char> in_infeasible_;
+  bool track_infeasible_ = true;  // List mode; otherwise CHUZR scans all m rows.
+  long long update_entries_ = 0;  // Positions and nonzeros of the primal updates since the list
+  long long update_nonzeros_ = 0;  // was last rebuilt, to choose the mode.
   std::vector<double> alpha_col_;
   std::vector<double> spike_;
   std::vector<double> dual_ray_;

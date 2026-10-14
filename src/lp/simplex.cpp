@@ -219,6 +219,19 @@ bool Simplex::primal_infeasible(Index j) const {
 void Simplex::rebuild_infeasible_list() {
   for (const Index k : infeasible_) in_infeasible_[k] = 0;
   infeasible_.clear();
+  // The list pays off only while the primal updates are sparse. With dense updates its upkeep
+  // (branches on a third or more of the rows per iteration) costs more than the m-row scan it saves:
+  // Netlib dfl001, greenbea and fit2p (alpha_col 30-92% of m) lost 4-9%, while the 467k-row LP
+  // (1.5%) gained. Decided here, at each recomputation, from the update entries counted since the
+  // last one, so the choice is deterministic.
+  if (update_entries_ > 0) {
+    track_infeasible_ = static_cast<double>(update_nonzeros_) <=
+                        options_.chuzr_list_max_density * static_cast<double>(update_entries_);
+    update_entries_ = 0;
+    update_nonzeros_ = 0;
+  }
+  if (options_.chuzr_full_scan) track_infeasible_ = false;
+  if (!track_infeasible_) return;
   for (Index k = 0; k < m_; ++k) {
     if (primal_infeasible(basic_[k])) {
       in_infeasible_[k] = 1;
@@ -228,10 +241,44 @@ void Simplex::rebuild_infeasible_list() {
 }
 
 void Simplex::note_basic_change(Index position) {
-  if (!in_infeasible_[position] && primal_infeasible(basic_[position])) {
+  if (track_infeasible_ && !in_infeasible_[position] && primal_infeasible(basic_[position])) {
     in_infeasible_[position] = 1;
     infeasible_.push_back(position);
   }
+}
+
+void Simplex::update_basic_values(const std::vector<double>& delta, double scale) {
+  // Local pointers: with the members, the push_back would make the compiler reload every vector's
+  // data pointer on each of the m iterations.
+  double* x = x_.data();
+  const Index* basic = basic_.data();
+  const double* d = delta.data();
+  const Index m = m_;
+  long long nonzeros = 0;
+  if (!track_infeasible_) {
+    for (Index k = 0; k < m; ++k) {
+      x[basic[k]] -= scale * d[k];
+      nonzeros += d[k] != 0.0;
+    }
+  } else {
+    const double* lower = lower_.data();
+    const double* upper = upper_.data();
+    char* listed = in_infeasible_.data();
+    const double tol = options_.primal_tol;
+    for (Index k = 0; k < m; ++k) {
+      // Zero entries are subtracted too, so both modes compute bitwise the same values.
+      const Index j = basic[k];
+      x[j] -= scale * d[k];
+      if (d[k] == 0.0) continue;
+      ++nonzeros;
+      if (!listed[k] && (x[j] < lower[j] - tol || x[j] > upper[j] + tol)) {
+        listed[k] = 1;
+        infeasible_.push_back(k);
+      }
+    }
+  }
+  update_entries_ += m;
+  update_nonzeros_ += nonzeros;
 }
 
 void Simplex::compute_dual() {
@@ -424,7 +471,8 @@ Index Simplex::choose_leaving_row() {
     const double w = std::isfinite(dse_weight_[k]) ? dse_weight_[k] : 1.0;
     return infeasibility * infeasibility / w;
   };
-  if (options_.chuzr_full_scan) {
+  if (!track_infeasible_) {
+    if (profile_) ++stats_.chuzr_scans;
     for (Index k = 0; k < m_; ++k) {
       const double score = score_of(k);
       if (score > best_score) {
@@ -546,10 +594,7 @@ void Simplex::apply_flips() {
   ProfileTimer measurement(time_iteration_, stats_, Component::kFlipFtran);
   factor_.ftran(column);
   measurement.switch_to(Component::kPrimalUpdate);
-  for (Index k = 0; k < m_; ++k) {
-    x_[basic_[k]] -= column[k];
-    if (column[k] != 0.0) note_basic_change(k);
-  }
+  update_basic_values(column, 1.0);
   stats_.bound_flips += static_cast<long long>(flips_.size());
 }
 
@@ -688,10 +733,7 @@ SimplexStatus Simplex::dual_loop() {
     measurement.switch_to(Component::kPrimalUpdate);
     // Primal step: p moves exactly to the violated bound.
     const double theta_p = delta / a_col;
-    for (Index k = 0; k < m_; ++k) {
-      x_[basic_[k]] -= theta_p * alpha_col_[k];
-      if (alpha_col_[k] != 0.0) note_basic_change(k);
-    }
+    update_basic_values(alpha_col_, theta_p);
     x_[q] += theta_p;
     x_[p] = bound;
 
@@ -1122,6 +1164,7 @@ void Simplex::finish_profile() {
   count_row("dual ratio candidates", stats_.ratio_candidates);
   count_row("dual Harris groups", stats_.harris_groups);
   count_row("CHUZR infeasibility list", stats_.chuzr_list);
+  log_.log(2, "  CHUZR full scans (dense updates) %lld", stats_.chuzr_scans);
   constexpr const char* reasons[] = {
       "initial", "phase", "interval", "fill_limit", "unsafe_update", "mismatch", "numerical",
       "confirmation", "rank_repair", "update_work"};
