@@ -1120,11 +1120,11 @@ void Simplex::finish_profile() {
   if (stats_.push_used) {
     log_.log(2, "push: superbasics=%lld targets=%lld pivots=%lld degenerate=%lld "
                 "refactorizations=%lld absorbed=%lld infeasible_blocks=%lld max_rhs=%.3e "
-                "seconds=%.6f infeasible=%lld max=%.6g path=%s",
+                "seconds=%.6f infeasible=%lld max=%.6g cost_shifts=%lld path=%s",
              stats_.push_superbasics, stats_.push_targets, stats_.push_pivots,
              stats_.push_degenerate_pivots, stats_.push_refactorizations, stats_.push_absorbed,
              stats_.push_infeasible_blocks, stats_.push_max_rhs, stats_.push_seconds,
-             stats_.push_infeasible, stats_.push_max_infeasibility,
+             stats_.push_infeasible, stats_.push_max_infeasibility, stats_.push_cost_shifts,
              stats_.push_dual_fallback ? "dual fallback"
              : stats_.push_primal      ? "primal"
                                        : "limit/error");
@@ -1336,7 +1336,9 @@ SimplexStatus Simplex::solve_push(const std::vector<VarStatus>& start,
   stats_.push_dual_fallback = true;
   // Shifts only: flipping boxed nonbasics to their other bound would move the basics as far as
   // the snap the push avoided (on the 467k-row LP, 5k infeasible rows became 225k).
+  const long long shifts = stats_.cost_shifts;
   correct_dual_infeasibilities(false);
+  stats_.push_cost_shifts = stats_.cost_shifts - shifts;
   skip_rebuild_ = true;
   return phase2();
 }

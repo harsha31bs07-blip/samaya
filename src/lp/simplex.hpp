@@ -53,6 +53,7 @@ struct SimplexStats {
   long long push_absorbed = 0;           // Snaps absorbed into the frozen right-hand side.
   long long push_infeasible_blocks = 0;  // Step-0 blocks by an already infeasible basic.
   double push_max_rhs = 0.0;             // Largest residual left at the end of the push.
+  long long push_cost_shifts = 0;        // Dual infeasibilities shifted away at the handoff.
   double push_seconds = 0.0;
   double push_max_infeasibility = 0.0;
   double push_primal_error = 0.0;  // Incremental versus final recomputed basics, relative.
