@@ -15,7 +15,7 @@ enum class PresolveStatus : std::uint8_t {
 struct PresolveOptions {
   double feasibility_tol = 1e-9;
   double integrality_tol = 1e-6;
-  // Keep reductions valid for integer columns (no substitution of integer columns, integral
+  // Keep reductions valid for integer columns (exact divisibility for substitution, integral
   // bounds). Postsolve then restores primal values only.
   bool mip = false;
   int max_passes = 50;
@@ -37,18 +37,27 @@ struct PresolveStats {
   Index implied_free_col_singletons = 0;
   Index implied_free_rejected_by_tolerance = 0;
   Index bounds_tightened = 0;
+  Index doubleton_continuous_cols = 0;
+  Index doubleton_integer_cols = 0;
+  Index doubleton_rejected_pivot = 0;
+  Index doubleton_rejected_integer_data = 0;
+  Index doubleton_rejected_divisibility = 0;
+  Index doubleton_rejected_integer_bound = 0;
+  Index doubleton_rejected_crossed_bounds = 0;
+  Index doubleton_rejected_residual = 0;
+  Index doubleton_rejected_nonfinite = 0;
 };
 
-// LP / MILP presolve: removes rows and columns without creating fill-in, then maps a solution of
+// LP / MILP presolve: removes rows and columns, then maps a solution of
 // the reduced model back to the original.
 //
 // Reductions: empty rows and columns, fixed columns, singleton rows (turned into column bounds),
 // forcing and redundant rows (from row activity bounds), dominated columns (a column whose cost
 // and coefficients all push it to one finite bound is fixed there), free or implied-free column
 // singletons (substituted out of an equality row, or absorbing an inequality row when the column
-// has no cost) and duplicate (parallel) rows.
+// has no cost), duplicate (parallel) rows and doubleton equations (MIP only).
 //
-// Postsolve undoes the reductions in reverse order and restores both the primal values and the
+// Postsolve undoes the reductions in reverse order and restores primal values and, in LP mode,
 // row duals: each step keeps the solution optimal for the model as it was before that reduction,
 // so the result satisfies the optimality conditions of the original model. Reduced costs follow
 // from the original model as c - A'y.
@@ -83,6 +92,7 @@ class Presolve {
     kSubstituteCol,   // Free singleton column solved from equality `row`.
     kSlackCol,        // Free cost-free singleton column absorbing inequality `row`.
     kDuplicateRow,    // `row2` merged into `row` with a_row2 = factor * a_row.
+    kDoubleton,       // MIP only: a * col + b * survivor = rhs_lower.
   };
   struct Term {
     Index col;
@@ -107,8 +117,18 @@ class Presolve {
     double rhs_upper = 0.0;
     bool flag1 = false;  // Forcing: at activity minimum. Duplicate: lower bound from row2.
     bool flag2 = false;  // Duplicate: upper bound from row2.
-    std::size_t first = 0;  // [first, last) in column_terms_ for singleton rows, otherwise terms_.
+    // [first, last) in column_terms_ for singleton rows / doubletons, otherwise terms_.
+    std::size_t first = 0;
     std::size_t last = 0;
+    Index survivor = -1;
+    double b = 0.0;
+    // Doubletons retain pre-transfer bounds and the staged post-substitution column and cost
+    // so the later LP dual implementation can use the same saved reduction state.
+    double survivor_lower = 0.0;
+    double survivor_upper = 0.0;
+    double survivor_cost = 0.0;
+    std::size_t survivor_first = 0;
+    std::size_t survivor_last = 0;
   };
 
   bool is_int(Index j) const { return model_.col_type[j] == VarType::kInteger; }
@@ -139,6 +159,7 @@ class Presolve {
   bool process_rows(bool& changed);
   bool process_singleton_cols(bool& changed);
   bool process_duplicate_rows(bool& changed);
+  bool process_doubleton_rows(bool& changed);
   void build_reduced();
 
   const Model& model_;

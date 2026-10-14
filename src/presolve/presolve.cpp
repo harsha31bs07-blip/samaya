@@ -1,6 +1,7 @@
 #include "presolve/presolve.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <unordered_map>
@@ -12,10 +13,11 @@ namespace {
 // A free column singleton is substituted out only if its coefficient is not tiny relative to the
 // rest of its row (as in threshold pivoting), to keep the substitution stable.
 constexpr double kSubstitutionPivotRatio = 0.01;
-// Relative tolerance for two rows being parallel.
-constexpr double kParallelTol = 1e-12;
 // Prove redundant bounds with an outward allowance, rather than accepting a near miss.
 constexpr double kImpliedFreeErrorTol = 1e-12;
+constexpr double kSubstitutionResidualRatio = 1e-9;
+constexpr double kIntegerDataLimit = 2147483648.0;  // Exact integer arithmetic fits int64_t.
+constexpr double kBoundRoundoff = 4.0 * 0x1p-52;
 
 }  // namespace
 
@@ -469,6 +471,7 @@ bool Presolve::process_duplicate_rows(bool& changed) {
     std::size_t p = first_active(i);
     std::size_t q = first_active(k);
     const double factor = row_k[q].a / row_i[p].a;
+    if (!std::isfinite(factor) || factor == 0.0) return 0.0;
     while (p < row_i.size() || q < row_k.size()) {
       while (p < row_i.size() && !col_active_[row_i[p].index]) ++p;
       while (q < row_k.size() && !col_active_[row_k[q].index]) ++q;
@@ -476,7 +479,11 @@ bool Presolve::process_duplicate_rows(bool& changed) {
       const bool end_k = q >= row_k.size();
       if (end_i || end_k) return end_i && end_k ? factor : 0.0;
       if (row_i[p].index != row_k[q].index) return 0.0;
-      if (std::fabs(row_k[q].a - factor * row_i[p].a) > kParallelTol * std::fabs(row_k[q].a)) {
+      // Require the same computed ratio and an exact, bitwise product back-check. A tiny
+      // residual can distinguish feasible equations with very large solutions.
+      if (row_k[q].a / row_i[p].a != factor ||
+          std::bit_cast<std::uint64_t>(row_k[q].a) !=
+              std::bit_cast<std::uint64_t>(factor * row_i[p].a)) {
         return 0.0;
       }
       ++p;
@@ -523,6 +530,256 @@ bool Presolve::process_duplicate_rows(bool& changed) {
   return true;
 }
 
+bool Presolve::process_doubleton_rows(bool& changed) {
+  if (!options_.mip) return true;  // Dual restoration for transferred bounds is a separate rule.
+  struct Update {
+    Index row;
+    double coefficient;
+    double lower;
+    double upper;
+    bool had_survivor;
+  };
+  for (Index i = 0; i < m_; ++i) {
+    if (!row_active_[i] || row_count_[i] != 2 || row_lower_[i] != row_upper_[i]) continue;
+    Entry pivot{}, survivor{};
+    bool first = true;
+    for (const auto& e : rows_[i]) {
+      if (!col_active_[e.index]) continue;
+      if (first) pivot = e;
+      else survivor = e;
+      first = false;
+    }
+    const auto prefer = [&](const Entry& e, const Entry& f) {
+      if (is_int(e.index) != is_int(f.index)) return !is_int(e.index);
+      if (col_count_[e.index] != col_count_[f.index]) {
+        return col_count_[e.index] < col_count_[f.index];
+      }
+      return std::fabs(e.a) > std::fabs(f.a);
+    };
+    if (prefer(survivor, pivot)) std::swap(pivot, survivor);
+    const Index x = pivot.index, y = survivor.index;
+    const double a = pivot.a, b = survivor.a, c = row_lower_[i];
+    if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c)) {
+      ++stats_.doubleton_rejected_nonfinite;
+      continue;
+    }
+    if (std::fabs(a) < kSubstitutionPivotRatio * std::max(std::fabs(a), std::fabs(b))) {
+      ++stats_.doubleton_rejected_pivot;
+      continue;
+    }
+    if (is_int(x)) {
+      const auto integral = [](double v) {
+        return std::fabs(v) <= kIntegerDataLimit && v == std::trunc(v);
+      };
+      if (!is_int(y) || !integral(a) || !integral(b) || !integral(c)) {
+        ++stats_.doubleton_rejected_integer_data;
+        continue;
+      }
+      const auto ia = static_cast<std::int64_t>(a);
+      if (static_cast<std::int64_t>(b) % ia != 0 || static_cast<std::int64_t>(c) % ia != 0) {
+        ++stats_.doubleton_rejected_divisibility;
+        continue;
+      }
+    }
+
+    // The lower/upper y endpoints come from these x bounds; signs determine their order.
+    const bool decreasing = (a > 0.0) == (b > 0.0);
+    const double xlo = decreasing ? upper_[x] : lower_[x];
+    const double xup = decreasing ? lower_[x] : upper_[x];
+    double lo = std::isfinite(xlo) ? (c - a * xlo) / b : -kInf;
+    double up = std::isfinite(xup) ? (c - a * xup) / b : kInf;
+    const auto endpoint_error = [&](double bound, double endpoint) {
+      if (!std::isfinite(bound)) return 0.0;
+      return kBoundRoundoff * ((std::fabs(c) + std::fabs(a * bound)) / std::fabs(b) +
+                              std::fabs(endpoint));
+    };
+    const double lo_error = endpoint_error(xlo, lo), up_error = endpoint_error(xup, up);
+    if ((std::isfinite(xlo) && !std::isfinite(lo)) ||
+        (std::isfinite(xup) && !std::isfinite(up)) ||
+        !std::isfinite(lo_error) || !std::isfinite(up_error)) {
+      ++stats_.doubleton_rejected_nonfinite;
+      continue;
+    }
+    // Outward endpoints: the computed ones widened by their rounding error, so they never cut
+    // off a y that is feasible in exact arithmetic.
+    double outer_lo = std::isfinite(lo) ? std::nextafter(lo - lo_error, -kInf) : lo;
+    double outer_up = std::isfinite(up) ? std::nextafter(up + up_error, kInf) : up;
+    // Infeasibility is claimed only when the interval stays empty after also allowing x's bound
+    // and the row their feasibility tolerances (as set_bounds does); a crossing inside them is
+    // skipped below, never collapsed.
+    const auto slack = [&](double bound) {
+      return (tol(bound) * std::fabs(a) + tol(c)) / std::fabs(b);
+    };
+    double proof_lo = std::isfinite(lo) ? std::nextafter(outer_lo - slack(xlo), -kInf) : lo;
+    double proof_up = std::isfinite(up) ? std::nextafter(outer_up + slack(xup), kInf) : up;
+    if (is_int(y)) {
+      outer_lo = std::ceil(outer_lo);
+      outer_up = std::floor(outer_up);
+      proof_lo = std::ceil(proof_lo);
+      proof_up = std::floor(proof_up);
+    }
+    if (std::max(lower_[y], proof_lo) > std::min(upper_[y], proof_up)) return false;
+    if (is_int(y)) {
+      // Start from the outward integers and move inward: rounding the computed endpoint
+      // directly can step past an exactly feasible integer (a true endpoint of 3 computed as
+      // 3 + 1 ulp would start at 4).
+      lo = std::max(lower_[y], outer_lo);
+      up = std::min(upper_[y], outer_up);
+      bool ambiguous = false, nonfinite = false;
+      const auto check_endpoint = [&](double& v, bool lower) {
+        if (!std::isfinite(v)) return;
+        // Validate both x bounds; this also covers endpoints retained from y's old bounds.
+        for (int attempt = 0; attempt < 2; ++attempt) {
+          const double product = b * v;
+          const double value = (c - product) / a;
+          const double error = kBoundRoundoff * (std::fabs(c) + std::fabs(product)) / std::fabs(a);
+          if (!std::isfinite(product) || !std::isfinite(value) || !std::isfinite(error)) {
+            nonfinite = true;
+            return;
+          }
+          // When b * v, c - b * v and the division are all exact (zero FMA and two-sum
+          // residuals, as with integral data), x(v) is compared without an allowance: otherwise
+          // an x landing exactly on its bound, the common integral case, would be ambiguous.
+          const double diff = c - product;
+          const double minus_part = diff - c;          // Knuth's two-sum of c and -product.
+          const double c_part = diff - minus_part;
+          const bool exact = std::fma(b, v, -product) == 0.0 &&
+                             (c - c_part) + (-product - minus_part) == 0.0 &&
+                             std::fma(a, value, -diff) == 0.0;
+          // Outside means outside by more than x's feasibility tolerance too: the solver would
+          // accept a nearer point, so cutting it off is not proven; that is ambiguous.
+          const double allowance = exact ? 0.0 : error;
+          const bool inside = exact ? value >= lower_[x] && value <= upper_[x]
+                                    : value - lower_[x] > error && upper_[x] - value > error;
+          if (inside) return;
+          const bool outside = lower_[x] - value > allowance + tol(lower_[x]) ||
+                               value - upper_[x] > allowance + tol(upper_[x]);
+          if (!outside || attempt == 1) {
+            ambiguous = true;
+            return;
+          }
+          const double next = v + (lower ? 1.0 : -1.0);
+          if (next == v || !std::isfinite(next)) {
+            ambiguous = true;
+            return;
+          }
+          v = next;
+        }
+      };
+      check_endpoint(lo, true);
+      check_endpoint(up, false);
+      if (nonfinite) {
+        ++stats_.doubleton_rejected_nonfinite;
+        continue;
+      }
+      if (ambiguous) {
+        ++stats_.doubleton_rejected_integer_bound;
+        continue;
+      }
+    } else {
+      lo = std::max(lower_[y], lo);
+      up = std::min(upper_[y], up);
+    }
+    if (lo > up) {
+      ++stats_.doubleton_rejected_crossed_bounds;
+      continue;
+    }
+
+    std::vector<Update> updates;
+    bool nonfinite = false, residual = false;
+    for (const auto& e : cols_[x]) {
+      const Index r = e.index;
+      if (r == i || !row_active_[r]) continue;
+      double old = 0.0, largest = 0.0;
+      bool had_survivor = false;
+      for (const auto& f : rows_[r]) {
+        if (!col_active_[f.index] || f.index == x) continue;
+        if (f.index == y) {
+          old = f.a;
+          had_survivor = true;
+        } else {
+          largest = std::max(largest, std::fabs(f.a));
+        }
+      }
+      const double coefficient = old - e.a * b / a;
+      const double shift = e.a * c / a;
+      const double rl = std::isfinite(row_lower_[r]) ? row_lower_[r] - shift : row_lower_[r];
+      const double ru = std::isfinite(row_upper_[r]) ? row_upper_[r] - shift : row_upper_[r];
+      nonfinite = nonfinite || !std::isfinite(coefficient) || !std::isfinite(shift) ||
+          (std::isfinite(row_lower_[r]) && !std::isfinite(rl)) ||
+          (std::isfinite(row_upper_[r]) && !std::isfinite(ru));
+      largest = std::max(largest, std::fabs(coefficient));
+      if (coefficient != 0.0 && std::fabs(coefficient) < kSubstitutionResidualRatio * largest) {
+        residual = true;
+      }
+      // Check all retained nonzeros, not only the changed survivor coefficient.
+      for (const auto& f : rows_[r]) {
+        if (col_active_[f.index] && f.index != x && f.index != y &&
+            std::fabs(f.a) < kSubstitutionResidualRatio * largest) residual = true;
+      }
+      updates.push_back({r, coefficient, rl, ru, had_survivor});
+    }
+    const double new_cost = cost_[y] - cost_[x] * b / a;
+    const double new_offset = offset_ + cost_[x] * c / a;
+    if (nonfinite || !std::isfinite(new_cost) || !std::isfinite(new_offset)) {
+      ++stats_.doubleton_rejected_nonfinite;
+      continue;
+    }
+    if (residual) {
+      ++stats_.doubleton_rejected_residual;
+      continue;
+    }
+
+    Record record{.kind = Kind::kDoubleton, .row = i, .col = x, .a = a,
+                  .cost = cost_[x], .old_lower = lower_[x], .old_upper = upper_[x],
+                  .rhs_lower = c};
+    record.survivor = y;
+    record.b = b;
+    record.survivor_lower = lower_[y];
+    record.survivor_upper = upper_[y];
+    record.survivor_cost = new_cost;
+    snapshot_column(x, record.first, record.last);
+    // Stage the post-substitution y snapshot too, before modifying either adjacency list.
+    std::vector<Entry> new_column;
+    for (const auto& e : cols_[y]) {
+      if (e.index != i && row_active_[e.index]) new_column.push_back(e);
+    }
+    for (const auto& u : updates) {
+      const auto it = std::lower_bound(new_column.begin(), new_column.end(), u.row,
+          [](const Entry& e, Index r) { return e.index < r; });
+      if (it != new_column.end() && it->index == u.row) {
+        if (u.coefficient == 0.0) new_column.erase(it);
+        else it->a = u.coefficient;
+      } else if (u.coefficient != 0.0) {
+        new_column.insert(it, {u.row, u.coefficient});
+      }
+    }
+    record.survivor_first = column_terms_.size();
+    column_terms_.insert(column_terms_.end(), new_column.begin(), new_column.end());
+    record.survivor_last = column_terms_.size();
+    records_.push_back(record);
+
+    for (const auto& u : updates) {
+      if (u.had_survivor) change_coefficient(u.row, y, u.coefficient);
+      else if (u.coefficient != 0.0) add_entry(u.row, y, u.coefficient);
+      remove_entry(u.row, x);
+      row_lower_[u.row] = u.lower;
+      row_upper_[u.row] = u.upper;
+    }
+    if (lo != lower_[y] || up != upper_[y]) ++stats_.bounds_tightened;
+    lower_[y] = lo;
+    upper_[y] = up;
+    cost_[y] = new_cost;
+    offset_ = new_offset;
+    remove_row(i);
+    remove_col(x);
+    if (is_int(x)) ++stats_.doubleton_integer_cols;
+    else ++stats_.doubleton_continuous_cols;
+    changed = true;
+  }
+  return true;
+}
+
 PresolveStatus Presolve::run() {
   for (Index j = 0; j < n_; ++j) {
     if (is_int(j) && !set_bounds(j, lower_[j], upper_[j])) return PresolveStatus::kInfeasible;
@@ -530,7 +787,7 @@ PresolveStatus Presolve::run() {
   for (int pass = 0; pass < options_.max_passes; ++pass) {
     bool changed = false;
     if (!process_rows(changed) || !process_cols(changed) || !process_singleton_cols(changed) ||
-        !process_duplicate_rows(changed)) {
+        !process_duplicate_rows(changed) || !process_doubleton_rows(changed)) {
       return PresolveStatus::kInfeasible;
     }
     ++stats_.passes;
@@ -653,6 +910,9 @@ void Presolve::postsolve(const std::vector<double>& reduced_x,
         if (duals) y[r.row] = r.cost / r.a;
         break;
       }
+      case Kind::kDoubleton:
+        x[r.col] = (r.rhs_lower - r.b * x[r.survivor]) / r.a;
+        break;
       case Kind::kSlackCol: {
         double s = 0.0;
         for (std::size_t t = r.first; t < r.last; ++t) s += terms_[t].a * x[terms_[t].col];
