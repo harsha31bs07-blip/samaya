@@ -89,6 +89,36 @@ laptop, clock factor 1.016 (WSL clock 1.6% fast). Raw data:
   (its step 0 measured 35 ms per crossover iteration and 110,681 rank repairs of the crossover
   basis).
 
+## GPU PDLP + crossover after simplex steps 1b and 2 (14 October 2026)
+
+`samaya --lp-method pdlp --gpu --crossover --time-limit 3600 --log-level 2`, build f837aba,
+alone on the laptop. Raw data: `bench/results/hour-f837aba/`.
+
+| Build | Crossover iterations in the hour | ms per iteration | Outcome |
+|---|---:|---:|---|
+| f377d79 (13 October) | 86,912 | about 41 | time limit |
+| f837aba | 128,576 | 27.8 | time limit |
+| f837aba + structural repair (not committed) | 107,136 | 33.4 | time limit |
+
+- The simplex is 1.48x faster per iteration than on 13 October, but crossover still does not
+  finish.
+- The structural repair takes the 110,681 dependent positions with structural columns instead
+  of equality logicals. It made the basis denser and the iterations slower, and the start no
+  better, so it stays out (the patch is kept outside the repository).
+
+**Why the start is bad (59d4874, `bench/results/snap-diag/`).** PDLP's point is in the interior
+of a large optimal face:
+- 357,920 nonbasic variables are off their bounds, 323,335 of them by more than 1e-3 relative.
+- `crossover_basis` returns statuses only, so all of them are snapped to a bound. Before the
+  snap, 7 basic values violate their bounds; after it, 153,844 do. The basic values move by up
+  to 6.2e9.
+- The dual simplex then works with about 212k infeasible rows throughout. That count is the true
+  number, not the list length.
+- More simplex speed alone cannot fix this. A push phase keeps PDLP's values and moves each
+  superbasic to a bound by ratio tests, so the basics stay feasible (Megiddo; the IPX
+  crossover). It is in progress. At about 5 ms per FTRAN, 358k pushes would take about
+  30 minutes.
+
 ## Still to run
 
 - The fixed Mittelmann subset (`bench/mittelmann_lp.test`): dual simplex, barrier, PDLP on the

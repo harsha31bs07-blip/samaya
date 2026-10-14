@@ -144,6 +144,18 @@ accepting optimality, and the verifier.
   presolve commits and its noise is large, so 1b's own overhead on small LPs is measured
   separately (`bench/results/step1b-overhead/`, sequential, 999caca against 2230a55).
 
+**1b overhead and the fix (f837aba).**
+- Measured sequentially, 1b made Netlib 3.0% slower with identical paths. dfl001, fit2p and
+  greenbea were 6–9% slower.
+- Their alpha_col is 30–92% dense after presolve. The primal update, which keeps the list, rose
+  from 6–8 to 42 µs per iteration.
+- f837aba keeps the list only while the updates since the last recomputation average at most 10%
+  nonzeros. Otherwise CHUZR scans.
+- Netlib against the pre-1b build: ratio geomean 1.0036, all 93 paths identical.
+- On the large LP, alpha_col density grows over the hour, from 1.5% at the start to 4.6% on
+  average. 31% of the CHUZRs ran as scans, and CHUZR averaged 4.8 ms. A rule using cost ratios
+  rather than a fixed density could be tuned later.
+
 ## 2. Adaptive refactorization (done: 45487d0)
 
 **Experiment (14 October 2026).** The large-LP crossover, 600 s, with the interval forced
@@ -224,8 +236,17 @@ goes to the bound nearest its PDLP value. The warm start then needs no rank repa
 What it did not change: the dual simplex still starts with about half the rows primal
 infeasible, and runs 17,408 iterations in 600 s without finishing. The final basis holds
 110,681 equality-row logicals, the same number as the repairs. Those logicals are fixed, so a
-basic one is infeasible whenever its row's activity is off the right-hand side. A basis that is independent from
-the start (the triangular crash of part 2) is the next lever.
+basic one is infeasible whenever its row's activity is off the right-hand side. A basis that is
+independent from the start (the triangular crash of part 2) is the next lever.
+
+**Correction (59d4874): the snap, not the basis choice, causes the infeasibility.**
+- The structural repair (equality logicals replaced by structural columns) ran an hour without
+  finishing, with slower iterations (33.4 against 27.8 ms). It is not committed.
+- The snap diagnostics: 357,920 superbasics. Basic values infeasible: 7 before the snap, 153,844
+  after it (`docs/results/large_lp.md`).
+- Part 2 is therefore a **primal push phase**: keep the superbasics' PDLP values, and push each
+  one to a bound by a ratio test, pivoting when a basic variable blocks. Then the primal simplex
+  runs from a nearly feasible vertex.
 
 ## Order
 
