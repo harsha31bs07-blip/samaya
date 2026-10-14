@@ -80,6 +80,37 @@ What it says for the items below:
 - **G (symmetry)** is confirmed for three instances; it stays last.
 - **Conflict analysis** carries no instance here; no further work on it.
 
+### Which HiGHS presolve rules carry it (13–14 October 2026, laptop, alone on the machine)
+
+`bench/attribute.py --configs presolve_rule_<name>_off`: HiGHS with one presolve rule switched
+off (`presolve_rule_off` bits 6–19), on the 7 instances it loses without presolve, 600 s, one
+thread; 98 runs. Seconds, or TL; the defaults from the table above in the first column.
+
+| Instance | default | aggregator | doubleton equation | probing | parallel rows/cols | sparsify | enumeration | free col substitution |
+|---|---|---|---|---|---|---|---|---|
+| mc11 | 71 | 70 | 71 | 70 | 70 | 70 | 70 | 72 |
+| neos-3627168-kasai | 98 | 85 | 80 | 78 | 83 | 209 | 99 | 68 |
+| rococoC10-001000 | 256 | **TL** | 435 | 312 | 404 | 522 | 344 | 562 |
+| csched008 | 274 | **TL** | 296 | 418 | 523 | 423 | 501 | 354 |
+| gmu-35-40 | 299 | **TL** | **TL** | **TL** | 301 | 475 | 595 | 314 |
+| neos-4738912-atrato | 379 | **TL** | 342 | **TL** | **TL** | **TL** | 393 | 398 |
+| tr12-30 | 413 | **TL** | **TL** | 482 | 454 | 423 | 365 | 399 |
+
+The other seven rules (column stuffing, dependent equations, dependent free columns, dual
+fixing, forcing column, forcing row, initial sweep) change no time by more than a few percent.
+
+What it says:
+- **The aggregator is the presolve gain:** without it HiGHS loses 5 of the 7, more than any other
+  rule and almost as many as without presolve at all. It is HiGHS's general substitution of
+  (implied) free columns out of equations, our **C3**; doubleton equations (our **C2**) are second
+  with 2 lost. C1 (implied-free column singletons) alone is worth less than either (its nearest
+  HiGHS rule, free column substitution, loses nothing), but C2 and C3 are built on its
+  implied-free test and postsolve, so the order C1 → C2 → C3 stays; C3 is the gate, not C1.
+- **Probing** is third (2 lost): that is item D's probing, ahead of the parallel-rows test.
+- **mc11 and neos-3627168-kasai** need presolve as a whole but no single rule: several rules
+  overlap there, so they measure C as a whole, not one rule.
+- Re-run this table after C3 with samaya, on the same 7 instances.
+
 ## 3. Work items, in order
 
 Effort is in working hours, including tests, presets (about 1.5 h of machine time) and a 30 min
