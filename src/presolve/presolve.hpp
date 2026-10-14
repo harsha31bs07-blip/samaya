@@ -34,6 +34,8 @@ struct PresolveStats {
   Index empty_cols = 0;
   Index dominated_cols = 0;
   Index free_col_singletons = 0;
+  Index implied_free_col_singletons = 0;
+  Index implied_free_rejected_by_tolerance = 0;
   Index bounds_tightened = 0;
 };
 
@@ -42,9 +44,9 @@ struct PresolveStats {
 //
 // Reductions: empty rows and columns, fixed columns, singleton rows (turned into column bounds),
 // forcing and redundant rows (from row activity bounds), dominated columns (a column whose cost
-// and coefficients all push it to one finite bound is fixed there), free column singletons
-// (substituted out of an equality row, or absorbing an inequality row when the column has no
-// cost) and duplicate (parallel) rows.
+// and coefficients all push it to one finite bound is fixed there), free or implied-free column
+// singletons (substituted out of an equality row, or absorbing an inequality row when the column
+// has no cost) and duplicate (parallel) rows.
 //
 // Postsolve undoes the reductions in reverse order and restores both the primal values and the
 // row duals: each step keeps the solution optimal for the model as it was before that reduction,
@@ -125,6 +127,13 @@ class Presolve {
   void fix_col(Index j, double value);
   bool set_bounds(Index j, double lower, double upper);  // False if crossed (infeasible).
   void activity_bounds(Index i, double& min_act, double& max_act) const;
+  struct ActivitySide {
+    double sum = 0.0;
+    double magnitude = 0.0;
+    Index infinite = 0;
+  };
+  void other_activity_bounds(Index i, Index j, ActivitySide& lower, ActivitySide& upper) const;
+  bool implied_free(Index i, Index j, double a, bool& tolerance_only) const;
 
   bool process_cols(bool& changed);
   bool process_rows(bool& changed);

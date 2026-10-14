@@ -13,6 +13,7 @@
 #include "lp/lp_solver.hpp"
 #include "presolve/presolve.hpp"
 #include "reference_lp.hpp"
+#include "reference_milp.hpp"
 #include "samaya/solver.hpp"
 #include "samaya/verify.hpp"
 #include "test_framework.hpp"
@@ -336,4 +337,322 @@ TEST(presolve_singleton_snapshot_independent_of_source_matrix) {
   CHECK_EQ(x[0], 2.0);
   CHECK_EQ(y[0], 0.0);
   CHECK_EQ(y[1], 1.0);
+}
+
+namespace {
+
+Model implied_singleton_lp(double a = 1.0) {
+  Model model;
+  model.obj = {1.0, 0.0};
+  model.col_lower = {0.0, 0.0};
+  model.col_upper = {100.0, 4.0};
+  model.col_type.assign(2, samaya::VarType::kContinuous);
+  model.row_lower = model.row_upper = {a > 0.0 ? 10.0 : -10.0};
+  model.A = samaya::SparseMatrix::from_triplets(1, 2, {{0, 0, a}, {0, 1, 1.0}});
+  return model;
+}
+
+void check_implied_postsolve(const Model& model, const Presolve& p) {
+  samaya::LpResult lp;
+  lp.status = samaya::SimplexStatus::kOptimal;
+  if (p.reduced().num_cols() > 0) {
+    lp = samaya::solve_lp(p.reduced(), samaya::LpSolveOptions{}, samaya::Logger(0));
+  }
+  REQUIRE(lp.status == samaya::SimplexStatus::kOptimal);
+  std::vector<double> x, y;
+  p.postsolve(lp.col_value, lp.row_dual, x, y);
+  CHECK(samaya::verify_lp_optimality(model, x, y).ok);
+  const auto ref = ReferenceLp(model).solve();
+  REQUIRE(ref.status == ReferenceResult::Status::kOptimal);
+  double objective = model.obj_offset;
+  for (Index j = 0; j < model.num_cols(); ++j) objective += model.obj[j] * x[j];
+  CHECK_NEAR(objective, ref.objective, 1e-8);
+}
+
+// A small bounded family around a feasible point. The first three continuous columns occur
+// only in their planted rows and have bounds strictly outside the hand-computed implied range.
+Model redundant_singleton_family(std::mt19937& rng, bool mip, int variant) {
+  const auto integer = [&](int lo, int hi) {
+    return std::uniform_int_distribution<int>(lo, hi)(rng);
+  };
+  const auto real = [&](double lo, double hi) {
+    return std::uniform_real_distribution<double>(lo, hi)(rng);
+  };
+  Model model;
+  model.sense = integer(0, 1) ? samaya::ObjSense::kMinimize : samaya::ObjSense::kMaximize;
+  model.obj_offset = real(-2.0, 2.0);
+  model.obj.resize(6);
+  model.col_lower.resize(6);
+  model.col_upper.resize(6);
+  model.col_type.assign(6, samaya::VarType::kContinuous);
+  std::vector<double> point(6);
+  for (Index j = 3; j < 6; ++j) {
+    point[j] = integer(0, 3);
+    model.col_lower[j] = point[j] - 2.0;
+    model.col_upper[j] = point[j] + 2.0;
+    model.obj[j] = real(-3.0, 3.0);
+    if (mip && j != 5) model.col_type[j] = samaya::VarType::kInteger;
+  }
+  std::vector<samaya::Triplet> entries;
+  for (Index i = 0; i < 3; ++i) {
+    const double a = integer(0, 1) ? 2.0 : -3.0;
+    point[i] = real(-3.0, 3.0);
+    const bool equality = i != 2;
+    model.obj[i] = equality ? real(-3.0, 3.0) : 0.0;
+    double activity = a * point[i];
+    double lower = 0.0, upper = 0.0;
+    entries.push_back({i, i, a});
+    for (Index j = 3; j < 6; ++j) {
+      double b = integer(-3, 3);
+      if (b == 0.0) b = 1.0;
+      entries.push_back({i, j, b});
+      activity += b * point[j];
+      lower += b * (b > 0.0 ? model.col_lower[j] : model.col_upper[j]);
+      upper += b * (b > 0.0 ? model.col_upper[j] : model.col_lower[j]);
+    }
+    const double rl = activity - (equality ? 0.0 : 1.0);
+    const double ru = activity + (equality ? 0.0 : 2.0);
+    model.row_lower.push_back(rl);
+    model.row_upper.push_back(ru);
+    double lo = (rl - upper) / a;
+    double up = (ru - lower) / a;
+    if (a < 0.0) std::swap(lo, up);
+    model.col_lower[i] = lo - real(1.0, 3.0);
+    model.col_upper[i] = up + real(1.0, 3.0);
+  }
+  // Retain a coupled core after singleton substitution; include infeasible cases as well as
+  // feasible equalities and inequalities, with fractional LP optima in the integer core.
+  const double activity = 2.0 * point[3] + point[4] - point[5];
+  model.row_lower.push_back(variant == 1 ? activity : -kInf);
+  model.row_upper.push_back(variant == 2 ? activity - 20.0 : activity + (variant == 1 ? 0.0 : 0.5));
+  entries.insert(entries.end(), {{3, 3, 2.0}, {3, 4, 1.0}, {3, 5, -1.0}});
+  model.A = samaya::SparseMatrix::from_triplets(4, 6, std::move(entries));
+  return model;
+}
+
+}  // namespace
+
+TEST(presolve_implied_free_equality_both_pivot_signs) {
+  for (const double a : {1.0, -2.0}) {
+    const Model model = implied_singleton_lp(a);  // [6, 10] or [5, 7].
+    Presolve p(model);
+    REQUIRE(p.run() == PresolveStatus::kReduced);
+    CHECK_EQ(p.stats().implied_free_col_singletons, 1);
+    CHECK_EQ(p.stats().free_col_singletons, 0);
+    check_implied_postsolve(model, p);
+  }
+}
+
+TEST(presolve_implied_free_rejects_nonredundant_bound) {
+  Model model = implied_singleton_lp();
+  model.col_lower[0] = 7.0;  // The row allows x = 6.
+  Presolve p(model);
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().implied_free_col_singletons, 0);
+  CHECK_EQ(p.stats().implied_free_rejected_by_tolerance, 0);
+  CHECK(std::find(p.col_map().begin(), p.col_map().end(), 0) != p.col_map().end());
+  check_implied_postsolve(model, p);
+}
+
+TEST(presolve_implied_free_inequality_slack) {
+  for (const double a : {1.0, -2.0}) {
+    Model model = implied_singleton_lp(a);
+    model.obj = {0.0, -1.0};
+    model.row_upper[0] += 2.0;  // Finite implied range, zero-cost slack.
+    Presolve p(model);
+    REQUIRE(p.run() == PresolveStatus::kReduced);
+    CHECK_EQ(p.stats().implied_free_col_singletons, 1);
+    check_implied_postsolve(model, p);
+    std::vector<double> x, y;
+    p.postsolve({}, {}, x, y);
+    CHECK(x[0] >= model.col_lower[0]);
+    CHECK(x[0] <= model.col_upper[0]);
+  }
+}
+
+TEST(presolve_implied_free_infinite_contributions) {
+  for (const int count : {1, 2}) {
+    for (const double a : {1.0, -2.0}) {
+      Model model = implied_singleton_lp(a);
+      model.col_upper[1] = kInf;
+      if (count == 2) {
+        model.obj.push_back(0.0);
+        model.col_lower.push_back(0.0);
+        model.col_upper.push_back(kInf);
+        model.col_type.push_back(samaya::VarType::kContinuous);
+        model.A = samaya::SparseMatrix::from_triplets(1, 3,
+            {{0, 0, a}, {0, 1, 1.0}, {0, 2, 1.0}});
+      }
+      Presolve p(model);
+      REQUIRE(p.run() == PresolveStatus::kReduced);
+      CHECK_EQ(p.stats().implied_free_col_singletons, 0);
+      CHECK_EQ(p.stats().implied_free_rejected_by_tolerance, 0);
+      check_implied_postsolve(model, p);
+    }
+  }
+  // No proof is needed on an already infinite column bound, even when that activity side
+  // has an infinite contribution. The finite upper side still has to be proved.
+  Model model = implied_singleton_lp();
+  model.col_lower[0] = -kInf;
+  model.col_upper[1] = kInf;
+  samaya::PresolveOptions options;
+  options.max_passes = 1;
+  Presolve p(model, options);
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().implied_free_col_singletons, 1);
+  std::vector<double> x, y;
+  p.postsolve({20.0}, {}, x, y);
+  CHECK_EQ(x[0], -10.0);
+  CHECK(x[0] <= model.col_upper[0]);
+}
+
+TEST(presolve_implied_free_later_bound_tightening) {
+  Model model = implied_singleton_lp();
+  model.col_upper[1] = 6.0;  // Avoid forcing before x is substituted.
+  model.obj.push_back(0.0);
+  model.col_lower.push_back(0.0);
+  model.col_upper.push_back(0.0);
+  model.col_type.push_back(samaya::VarType::kContinuous);
+  model.obj.push_back(0.0);
+  model.col_lower.push_back(0.0);
+  model.col_upper.push_back(3.0);
+  model.col_type.push_back(samaya::VarType::kContinuous);
+  model.row_lower.push_back(4.0);
+  model.row_upper.push_back(4.0);
+  // Keep y in two rows after x's removal, so the next row pass tightens it to 4.
+  model.row_lower.push_back(5.0);
+  model.row_upper.push_back(5.0);
+  model.A = samaya::SparseMatrix::from_triplets(3, 4,
+      {{0, 0, 1.0}, {0, 1, 1.0}, {1, 1, 1.0}, {1, 2, 1.0},
+       {2, 1, 1.0}, {2, 3, 1.0}});
+  samaya::PresolveOptions first_pass;
+  first_pass.max_passes = 1;
+  Presolve early(model, first_pass);
+  REQUIRE(early.run() == PresolveStatus::kReduced);
+  CHECK_EQ(early.stats().implied_free_col_singletons, 1);
+  CHECK_EQ(early.stats().bounds_tightened, 0);
+  CHECK(std::find(early.col_map().begin(), early.col_map().end(), 0) == early.col_map().end());
+  CHECK(std::find(early.col_map().begin(), early.col_map().end(), 1) != early.col_map().end());
+  Presolve p(model);
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().implied_free_col_singletons, 2);  // x first, the last column after y is fixed.
+  CHECK(p.stats().passes >= 2);
+  CHECK(p.stats().bounds_tightened > 0);
+  check_implied_postsolve(model, p);
+}
+
+TEST(presolve_implied_free_rechecks_tightened_candidate) {
+  Model model = implied_singleton_lp();
+  model.row_lower.push_back(7.0);
+  model.row_upper.push_back(kInf);
+  model.A = samaya::SparseMatrix::from_triplets(2, 2,
+      {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}});
+  Presolve p(model);
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK(p.stats().bounds_tightened > 0);
+  CHECK_EQ(p.stats().implied_free_col_singletons, 0);
+  CHECK(std::find(p.col_map().begin(), p.col_map().end(), 0) != p.col_map().end());
+  check_implied_postsolve(model, p);
+}
+
+TEST(presolve_implied_free_one_sided_row_and_column_bounds) {
+  Model model = implied_singleton_lp();
+  model.obj = {0.0, -1.0};
+  model.col_lower[0] = -kInf;
+  model.row_lower[0] = -kInf;
+  Presolve p(model);
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().implied_free_col_singletons, 1);
+  check_implied_postsolve(model, p);
+  // With a negative pivot, the infinite row side instead leaves the upper bound unproved.
+  model.col_lower[0] = -100.0;
+  model.A = samaya::SparseMatrix::from_triplets(1, 2, {{0, 0, -1.0}, {0, 1, 1.0}});
+  model.col_upper[0] = kInf;
+  Presolve negative(model);
+  REQUIRE(negative.run() == PresolveStatus::kReduced);
+  // Here the row implies x >= -10, so the finite lower bound is redundant.
+  CHECK_EQ(negative.stats().implied_free_col_singletons, 1);
+  check_implied_postsolve(model, negative);
+}
+
+TEST(presolve_implied_free_error_allowance) {
+  for (const bool lower : {true, false}) {
+    Model model = implied_singleton_lp();
+    if (lower) {
+      model.col_lower[0] = 6.0 - 6e-13;
+    } else {
+      model.col_upper[0] = 10.0 + 1e-12;
+    }
+    Presolve p(model);
+    REQUIRE(p.run() == PresolveStatus::kReduced);
+    CHECK_EQ(p.stats().implied_free_col_singletons, 0);
+    CHECK(p.stats().implied_free_rejected_by_tolerance > 0);
+    check_implied_postsolve(model, p);
+  }
+}
+
+TEST(presolve_implied_free_integer_columns_excluded_in_mip) {
+  Model model = implied_singleton_lp();
+  model.col_type[0] = samaya::VarType::kInteger;
+  samaya::PresolveOptions options;
+  options.mip = true;
+  Presolve p(model, options);
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().implied_free_col_singletons, 0);
+  CHECK(std::find(p.col_map().begin(), p.col_map().end(), 0) != p.col_map().end());
+}
+
+TEST(presolve_implied_free_differential_with_and_without_presolve) {
+  std::mt19937 rng(130102026);
+  Index lp_substitutions = 0, mip_substitutions = 0;
+  for (const bool mip : {false, true}) {
+    for (int k = 0; k < 300; ++k) {
+      const Model model = redundant_singleton_family(rng, mip, k % 3);
+      samaya::Status expected;
+      double objective;
+      if (mip) {
+        const auto ref = samaya::test::reference_milp(model);
+        REQUIRE(ref.status == samaya::test::ReferenceMilpResult::Status::kOptimal ||
+                ref.status == samaya::test::ReferenceMilpResult::Status::kInfeasible);
+        expected = ref.status == samaya::test::ReferenceMilpResult::Status::kOptimal
+            ? samaya::Status::kOptimal : samaya::Status::kInfeasible;
+        objective = ref.objective;
+      } else {
+        const auto ref = ReferenceLp(model).solve();
+        REQUIRE(ref.status == ReferenceResult::Status::kOptimal ||
+                ref.status == ReferenceResult::Status::kInfeasible);
+        expected = ref.status == ReferenceResult::Status::kOptimal
+            ? samaya::Status::kOptimal : samaya::Status::kInfeasible;
+        objective = ref.objective;
+      }
+      samaya::PresolveOptions options;
+      options.mip = mip;
+      Presolve p(model, options);
+      const auto status = p.run();
+      (mip ? mip_substitutions : lp_substitutions) += p.stats().implied_free_col_singletons;
+      if (expected == samaya::Status::kOptimal) {
+        REQUIRE(status == PresolveStatus::kReduced);
+        if (!mip) check_implied_postsolve(model, p);  // Bypass public-solver fallbacks.
+      }
+      for (const bool enabled : {false, true}) {
+        samaya::Params params;
+        params.log_level = 0;
+        params.presolve = enabled;
+        const auto result = samaya::Solver(params).solve(model);
+        CHECK(result.status == expected);
+        // MIP infeasibility is a search/presolve conclusion, without an LP certificate.
+        if (!mip || expected == samaya::Status::kOptimal) CHECK(result.verified);
+        if (expected == samaya::Status::kOptimal) {
+          CHECK_NEAR(result.objective, objective, 1e-6 * (1.0 + std::fabs(objective)));
+          if (!mip) {
+            CHECK(samaya::verify_lp_optimality(model, result.col_value, result.row_dual).ok);
+          }
+        }
+      }
+    }
+  }
+  std::printf("  implied-free differential: %d LP, %d MILP substitutions (%d total)\n",
+              lp_substitutions, mip_substitutions, lp_substitutions + mip_substitutions);
+  CHECK(lp_substitutions >= 100);
+  CHECK(mip_substitutions >= 100);
 }

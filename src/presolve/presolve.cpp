@@ -14,6 +14,8 @@ namespace {
 constexpr double kSubstitutionPivotRatio = 0.01;
 // Relative tolerance for two rows being parallel.
 constexpr double kParallelTol = 1e-12;
+// Prove redundant bounds with an outward allowance, rather than accepting a near miss.
+constexpr double kImpliedFreeErrorTol = 1e-12;
 
 }  // namespace
 
@@ -186,6 +188,65 @@ void Presolve::activity_bounds(Index i, double& min_act, double& max_act) const 
   }
 }
 
+void Presolve::other_activity_bounds(Index i, Index j, ActivitySide& lower,
+                                     ActivitySide& upper) const {
+  lower = {};
+  upper = {};
+  const auto add = [](ActivitySide& side, double term) {
+    if (std::isinf(term)) {
+      ++side.infinite;
+    } else {
+      side.sum += term;
+      side.magnitude += std::fabs(term);
+    }
+  };
+  // Never subtract the singleton's contribution from an activity that may be infinite.
+  for (const auto& e : rows_[i]) {
+    const Index k = e.index;
+    if (k == j || !col_active_[k]) continue;
+    add(lower, e.a * (e.a > 0.0 ? lower_[k] : upper_[k]));
+    add(upper, e.a * (e.a > 0.0 ? upper_[k] : lower_[k]));
+  }
+}
+
+bool Presolve::implied_free(Index i, Index j, double a, bool& tolerance_only) const {
+  tolerance_only = false;
+  ActivitySide lower, upper;
+  other_activity_bounds(i, j, lower, upper);
+  const double rl = row_lower_[i];
+  const double ru = row_upper_[i];
+  if (!std::isfinite(a) || a == 0.0 || std::isnan(rl) || std::isnan(ru) ||
+      !std::isfinite(lower.sum) || !std::isfinite(upper.sum) ||
+      !std::isfinite(lower.magnitude) || !std::isfinite(upper.magnitude)) return false;
+
+  double lo = (std::isfinite(rl) && upper.infinite == 0) ? (rl - upper.sum) / a
+                                                       : -kInf / a;
+  double up = (std::isfinite(ru) && lower.infinite == 0) ? (ru - lower.sum) / a
+                                                       : kInf / a;
+  if (a < 0.0) std::swap(lo, up);
+  if (std::isnan(lo) || std::isnan(up) || lo > up) return false;
+  const bool prove_lower = lower_[j] != -kInf;
+  const bool prove_upper = upper_[j] != kInf;
+  if ((prove_lower && (!std::isfinite(lo) || !(lo >= lower_[j]))) ||
+      (prove_upper && (!std::isfinite(up) || !(up <= upper_[j])))) return false;
+
+  // Include the row bound in the subtraction's magnitude and the column bound in the
+  // comparison's scale. Round the shrunken bounds inward so addition cannot erase the margin.
+  const double abs_a = std::fabs(a);
+  const double lo_scale = a > 0.0 ? std::fabs(rl) + upper.magnitude
+                                 : std::fabs(ru) + lower.magnitude;
+  const double up_scale = a > 0.0 ? std::fabs(ru) + lower.magnitude
+                                 : std::fabs(rl) + upper.magnitude;
+  const double lo_error = kImpliedFreeErrorTol * (lo_scale / abs_a + std::fabs(lower_[j]));
+  const double up_error = kImpliedFreeErrorTol * (up_scale / abs_a + std::fabs(upper_[j]));
+  const bool lower_ok = !prove_lower ||
+      (std::isfinite(lo_error) && lo >= std::nextafter(lower_[j] + lo_error, kInf));
+  const bool upper_ok = !prove_upper ||
+      (std::isfinite(up_error) && up <= std::nextafter(upper_[j] - up_error, -kInf));
+  tolerance_only = !lower_ok || !upper_ok;
+  return !tolerance_only;
+}
+
 bool Presolve::process_rows(bool& changed) {
   for (Index i = 0; i < m_; ++i) {
     if (!row_active_[i]) continue;
@@ -318,7 +379,6 @@ bool Presolve::process_cols(bool& changed) {
 bool Presolve::process_singleton_cols(bool& changed) {
   for (Index j = 0; j < n_; ++j) {
     if (!col_active_[j] || col_count_[j] != 1) continue;
-    if (lower_[j] > -kInf || upper_[j] < kInf) continue;
     if (options_.mip && is_int(j)) continue;
     const auto entry = std::find_if(cols_[j].begin(), cols_[j].end(),
                                     [&](const Entry& e) { return row_active_[e.index]; });
@@ -332,6 +392,16 @@ bool Presolve::process_singleton_cols(bool& changed) {
       if (col_active_[e.index]) row_max = std::max(row_max, std::fabs(e.a));
     }
     if (std::fabs(a) < kSubstitutionPivotRatio * row_max) continue;
+
+    const bool free = lower_[j] == -kInf && upper_[j] == kInf;
+    if (!free) {
+      bool tolerance_only;
+      // Bounds can change between reductions: prove this immediately before substitution.
+      if (!implied_free(i, j, a, tolerance_only)) {
+        if (tolerance_only) ++stats_.implied_free_rejected_by_tolerance;
+        continue;
+      }
+    }
 
     Record record{.kind = equality ? Kind::kSubstituteCol : Kind::kSlackCol,
                   .row = i,
@@ -358,7 +428,11 @@ bool Presolve::process_singleton_cols(bool& changed) {
     records_.push_back(record);
     remove_col(j);
     remove_row(i);
-    ++stats_.free_col_singletons;
+    if (free) {
+      ++stats_.free_col_singletons;
+    } else {
+      ++stats_.implied_free_col_singletons;
+    }
     changed = true;
   }
   return true;
