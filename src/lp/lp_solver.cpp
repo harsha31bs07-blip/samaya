@@ -80,13 +80,27 @@ LpResult solve_lp(const Model& model, const LpSolveOptions& options, const Logge
 
   auto simplex = std::make_unique<Simplex>(scaled_lp, options.simplex, log);
   LpResult result;
-  result.status = options.start.empty() ? simplex->solve() : simplex->solve(options.start);
+  if (!options.start.empty() && !options.start_values.empty()) {
+    std::vector<double> values = options.start_values;
+    if (values.size() == static_cast<std::size_t>(n)) {
+      for (Index j = 0; j < n; ++j) values[j] /= scaled.col[j];
+    }
+    result.status = simplex->solve(options.start, values);
+  } else {
+    result.status = options.start.empty() ? simplex->solve() : simplex->solve(options.start);
+  }
   result.iterations = simplex->iterations();
   result.stats = simplex->stats();
 
   // The cleanup shares the time limit: it gets what the scaled solve left, not a fresh allowance.
   SimplexOptions polish_options = options.simplex;
   polish_options.time_limit = options.simplex.time_limit - timer.seconds();
+  if (result.stats.push_used && polish_options.max_iterations >= 0) {
+    // Pushes share the iteration budget (Simplex::limit_reached), so the polish gets the rest.
+    const long long used =
+        result.iterations + result.stats.push_targets + result.stats.push_pivots;
+    polish_options.max_iterations = std::max(0LL, polish_options.max_iterations - used);
+  }
   if (options.scale && result.status == SimplexStatus::kOptimal && polish_options.time_limit > 0.0) {
     // Tolerances met in the scaled space can be violated once unscaled (reduced costs are divided
     // by the column scale factors). Continue on the unscaled problem from the optimal basis; this

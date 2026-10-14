@@ -86,10 +86,16 @@ bool verify_lp(const Model& model, const LpResult& lp, Result& result) {
 
 LpResult solve_lp_verified(const Model& model, const Params& params, const Logger& log,
                            Result& result, bool& verified, const std::vector<VarStatus>& start,
-                           long long max_iterations) {
+                           long long max_iterations, const std::vector<double>& start_values) {
   LpSolveOptions attempts[3];
   attempts[0] = lp_options_from_params(params);
   attempts[0].start = start;
+  attempts[0].start_values = start_values;
+  for (Index j = 0; j < static_cast<Index>(start_values.size()); ++j) {
+    // max/min: std::clamp is undefined for crossed bounds.
+    attempts[0].start_values[j] =
+        std::max(model.col_lower[j], std::min(start_values[j], model.col_upper[j]));
+  }
   attempts[0].simplex.max_iterations = max_iterations;
   attempts[1] = attempts[0];
   attempts[1].simplex.primal_tol = std::min(attempts[1].simplex.primal_tol, 1e-9);
@@ -116,6 +122,12 @@ LpResult solve_lp_verified(const Model& model, const Params& params, const Logge
   }
   lp.iterations = iterations;
   return lp;
+}
+
+LpResult solve_lp_verified(const Model& model, const Params& params, const Logger& log,
+                           Result& result, bool& verified, const std::vector<VarStatus>& start,
+                           long long max_iterations) {
+  return solve_lp_verified(model, params, log, result, verified, start, max_iterations, {});
 }
 
 namespace {
@@ -250,7 +262,8 @@ void fill_continuous_optimum(const Model& model, std::vector<double> x, std::vec
 // verifier. `start` gets the crossover basis of the IPM's point when the simplex should continue
 // from it: after a failed verification, and with Params::crossover.
 bool solve_barrier_lp(const Model& model, const Params& params, const Logger& log,
-                      Result& result, std::vector<VarStatus>& start) {
+                      Result& result, std::vector<VarStatus>& start,
+                      std::vector<double>& start_values) {
   IpmOptions options;
   options.time_limit = params.time_limit;
   const IpmResult ipm = solve_ipm(model, options, log);
@@ -271,6 +284,7 @@ bool solve_barrier_lp(const Model& model, const Params& params, const Logger& lo
   if (params.crossover) {
     CrossoverStats stats;
     start = crossover_basis(model, ipm.x, ipm.y, &stats);
+    start_values = ipm.x;
     log_crossover_stats(stats, log);
   }
   // The last iterate first; the polished point if the iterate does not pass.
@@ -296,6 +310,7 @@ bool solve_barrier_lp(const Model& model, const Params& params, const Logger& lo
   if (start.empty()) {
     CrossoverStats stats;
     start = crossover_basis(model, ipm.x, ipm.y, &stats);
+    start_values = ipm.x;
     log_crossover_stats(stats, log);
   }
   return false;
@@ -375,7 +390,7 @@ void solve_qp_model(const Model& model, const Params& params, const Logger& log,
 // crossover basis of an optimal PDLP point when the simplex should continue from it: after a
 // failed verification, and with Params::crossover.
 bool solve_pdlp_lp(const Model& model, const Params& params, const Logger& log, Result& result,
-                   std::vector<VarStatus>& start) {
+                   std::vector<VarStatus>& start, std::vector<double>& start_values) {
   const Scaling scaled = compute_scaling(model.A);
   const LpProblem scaled_lp = make_problem(model, scaled);
   PdlpOptions pdlp_opts;
@@ -436,6 +451,7 @@ bool solve_pdlp_lp(const Model& model, const Params& params, const Logger& log, 
   if (has_point && (params.crossover || !verified)) {
     CrossoverStats stats;
     start = crossover_basis(model, lp.col_value, lp.row_dual, &stats);
+    start_values = lp.col_value;
     log_crossover_stats(stats, log);
   }
   if (!verified) {
@@ -508,10 +524,11 @@ void solve_lp_model(const Model& model, const Params& requested, const Logger& l
   Params params = requested;
   bool solved = false;
   std::vector<VarStatus> start;  // Crossover basis from the barrier or PDLP point.
+  std::vector<double> start_values;
   if (requested.lp_method == LpMethod::kBarrier || requested.lp_method == LpMethod::kPdlp) {
     solved = requested.lp_method == LpMethod::kBarrier
-                 ? solve_barrier_lp(model, requested, log, result, start)
-                 : solve_pdlp_lp(model, requested, log, result, start);
+                 ? solve_barrier_lp(model, requested, log, result, start, start_values)
+                 : solve_pdlp_lp(model, requested, log, result, start, start_values);
     // A time limit in the first method is final; after any other failure the dual simplex gets
     // what is left of the limit.
     if ((solved && start.empty()) || result.status == Status::kTimeLimit) return;
@@ -530,7 +547,7 @@ void solve_lp_model(const Model& model, const Params& requested, const Logger& l
     const long long cap = params.crossover_max_iterations >= 0
                               ? params.crossover_max_iterations
                               : std::max<long long>(kCrossoverMinIterations, 2 * nm);
-    lp = solve_lp_verified(model, params, log, result, verified, start, cap);
+    lp = solve_lp_verified(model, params, log, result, verified, start, cap, start_values);
     iterations = lp.iterations;
     // Only an answer counts (the verifier passes a status without one, like an iteration
     // limit); without the verifier, an answer is accepted as it is.

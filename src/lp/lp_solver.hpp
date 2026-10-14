@@ -33,6 +33,8 @@ struct LpSolveOptions {
   // Starting statuses (n + m, exactly m basic), e.g. from crossover_basis; empty: the slack
   // basis. Statuses do not depend on scaling, so the same start serves every attempt.
   std::vector<VarStatus> start;
+  // Optional n structural values in model space; used only with a starting basis.
+  std::vector<double> start_values;
 };
 
 // The model in computational form (minimization), scaled by `scaling`:

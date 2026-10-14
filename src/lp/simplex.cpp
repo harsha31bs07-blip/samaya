@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <queue>
 
 namespace samaya {
 
@@ -84,6 +85,13 @@ constexpr double kFeasibilityCostBase = 1e-3;
 // Relative disagreement between the pivot element computed from the column (ftran) and the row
 // (btran) that triggers a refactorization.
 constexpr double kPivotConsistencyTol = 1e-7;
+// Same drift allowance for the primal loop and the push handoff.
+constexpr double kPrimalDriftAllowance = 100.0;
+// Push phase: a superbasic blocked this often at step 0 by an already infeasible basic is snapped
+// (its change absorbed into the frozen right-hand side) instead, so the swaps cannot cycle.
+constexpr int kMaxInfeasibleBlocks = 2;
+// Pushes and pivots between two level-2 progress lines of the push phase.
+constexpr long long kPushReportInterval = 10000;
 
 BasisFactor::Options factor_options(const SimplexOptions& options, const Logger& log) {
   BasisFactor::Options f;
@@ -151,15 +159,18 @@ void Simplex::set_value_from_status(Index j) {
   }
 }
 
-bool Simplex::rebuild(RebuildReason reason) {
+bool Simplex::rebuild(RebuildReason reason, bool recompute) {
   if (profile_) ++stats_.rebuild_calls;
   const ProfileTimer measurement(profile_, stats_, Component::kRebuild,
                                  &stats_.max_rebuild_seconds);
   for (int attempt = 0; attempt < 4; ++attempt) {
     ++stats_.refactorizations;
+    if (pushing_) ++stats_.push_refactorizations;
     if (factor_.factorize(basic_, attempt == 0 ? reason : RebuildReason::kRankRepair) == 0) {
-      compute_primal();
-      compute_dual();
+      if (recompute) {
+        compute_primal();
+        compute_dual();
+      }
       factor_valid_ = true;
       return true;
     }
@@ -186,7 +197,7 @@ bool Simplex::rebuild(RebuildReason reason) {
       } else {
         status_[leaving] = VarStatus::kAtZero;
       }
-      set_value_from_status(leaving);
+      if (!pushing_) set_value_from_status(leaving);
       position_[leaving] = -1;
       basic_[pos] = entering;
       position_[entering] = pos;
@@ -199,7 +210,10 @@ bool Simplex::rebuild(RebuildReason reason) {
 }
 
 void Simplex::compute_primal() {
+  if (pushing_) ++stats_.push_primal_recomputations;
+  // During the push the equations are [A -I] v = push_rhs_ (the start point's residual).
   std::vector<double> rhs(static_cast<std::size_t>(m_), 0.0);
+  if (pushing_ && !push_rhs_.empty()) rhs = push_rhs_;
   for (Index j = 0; j < nt_; ++j) {
     if (status_[j] == VarStatus::kBasic) continue;
     const double v = x_[j];
@@ -346,7 +360,7 @@ void Simplex::place_nonbasic_dual_feasible() {
   }
 }
 
-bool Simplex::correct_dual_infeasibilities() {
+bool Simplex::correct_dual_infeasibilities(bool flip_boxed) {
   bool flipped = false;
   bool changed = false;
   const double tol = options_.dual_tol;
@@ -359,7 +373,7 @@ bool Simplex::correct_dual_infeasibilities() {
                             (st == VarStatus::kAtZero && std::fabs(dj) > tol);
     if (!infeasible) continue;
     changed = true;
-    if (lower_[j] > -kInf && upper_[j] < kInf) {
+    if (flip_boxed && lower_[j] > -kInf && upper_[j] < kInf) {
       status_[j] = dj >= 0.0 ? VarStatus::kAtLower : VarStatus::kAtUpper;
       set_value_from_status(j);
       flipped = true;
@@ -441,11 +455,12 @@ double Simplex::max_dual_infeasibility() const {
 }
 
 bool Simplex::limit_reached(SimplexStatus& status) const {
-  if (iterations_ >= max_iterations_) {
+  const long long work = iterations_ + stats_.push_targets + stats_.push_pivots;
+  if (work >= max_iterations_) {
     status = SimplexStatus::kIterationLimit;
     return true;
   }
-  if ((iterations_ & 31) == 0 && timer_.seconds() > options_.time_limit) {
+  if ((work & 31) == 0 && timer_.seconds() > options_.time_limit) {
     status = SimplexStatus::kTimeLimit;
     return true;
   }
@@ -793,7 +808,7 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
   const double ptol = options_.primal_tol;
   // Rounding drift of a few tolerances is absorbed by the Harris ratio test during the loop; only
   // the final point must be feasible within the tolerance (the dual simplex repairs it if not).
-  const double drift_tol = 100.0 * ptol;
+  const double drift_tol = kPrimalDriftAllowance * ptol;
   if (max_primal_infeasibility() > drift_tol) {
     result = LoopResult::kLostFeasibility;
     return SimplexStatus::kOptimal;
@@ -1102,6 +1117,18 @@ void Simplex::begin_profile(bool warm_start) {
 }
 
 void Simplex::finish_profile() {
+  if (stats_.push_used) {
+    log_.log(2, "push: superbasics=%lld targets=%lld pivots=%lld degenerate=%lld "
+                "refactorizations=%lld absorbed=%lld infeasible_blocks=%lld max_rhs=%.3e "
+                "seconds=%.6f infeasible=%lld max=%.6g path=%s",
+             stats_.push_superbasics, stats_.push_targets, stats_.push_pivots,
+             stats_.push_degenerate_pivots, stats_.push_refactorizations, stats_.push_absorbed,
+             stats_.push_infeasible_blocks, stats_.push_max_rhs, stats_.push_seconds,
+             stats_.push_infeasible, stats_.push_max_infeasibility,
+             stats_.push_dual_fallback ? "dual fallback"
+             : stats_.push_primal      ? "primal"
+                                       : "limit/error");
+  }
   if (!profile_) return;
   stats_.total_seconds = std::chrono::duration<double>(
       std::chrono::steady_clock::now() - profile_start_).count();
@@ -1210,6 +1237,284 @@ SimplexStatus Simplex::solve(const std::vector<VarStatus>& start) {
   const SimplexStatus result = solve_warm(start);
   finish_profile();
   return result;
+}
+
+SimplexStatus Simplex::solve(const std::vector<VarStatus>& start,
+                             const std::vector<double>& values) {
+  if (values.empty()) return solve(start);
+  begin_profile(true);
+  const SimplexStatus result = solve_push(start, values);
+  finish_profile();
+  return result;
+}
+
+VarStatus Simplex::nearest_status(Index j) const {
+  if (lower_[j] > -kInf && (upper_[j] == kInf ||
+      std::fabs(x_[j] - lower_[j]) <= std::fabs(x_[j] - upper_[j]))) {
+    return VarStatus::kAtLower;
+  }
+  return upper_[j] < kInf ? VarStatus::kAtUpper : VarStatus::kAtZero;
+}
+
+double Simplex::push_target(Index j) const {
+  const VarStatus st = nearest_status(j);
+  if (st == VarStatus::kAtLower) return lower_[j];
+  if (st == VarStatus::kAtUpper) return upper_[j];
+  // A free variable has no finite bound: zero is its finite representative, even when
+  // the basics allow an unbounded direction. No infinite step is ever needed.
+  return 0.0;
+}
+
+SimplexStatus Simplex::solve_push(const std::vector<VarStatus>& start,
+                                  const std::vector<double>& values) {
+  // Without a usable point, the statuses alone still make today's warm start.
+  if (values.size() != static_cast<std::size_t>(n_) ||
+      !std::all_of(values.begin(), values.end(), [](double v) { return std::isfinite(v); })) {
+    return solve_warm(start);
+  }
+  if (start.size() != static_cast<std::size_t>(nt_) ||
+      std::count(start.begin(), start.end(), VarStatus::kBasic) != m_) return solve_cold();
+  reset();
+  factor_valid_ = false;
+  skip_rebuild_ = false;
+  stats_.push_used = true;
+  pushing_ = true;
+  const Timer push_timer;
+  Index pos = 0;
+  // max/min rather than std::clamp, which is undefined for crossed bounds (an infeasible model).
+  const auto clamp = [&](Index j, double v) {
+    return std::max(lower_[j], std::min(v, upper_[j]));
+  };
+  for (Index j = 0; j < n_; ++j) x_[j] = clamp(j, values[j]);
+  std::vector<double> activity(static_cast<std::size_t>(m_), 0.0);
+  lp_.A.multiply(std::span<const double>(x_).first(static_cast<std::size_t>(n_)), activity);
+  for (Index i = 0; i < m_; ++i) x_[n_ + i] = clamp(n_ + i, activity[i]);
+  // The point itself, basics included, is the start: its residual [A -I] z0 (nonzero where an
+  // activity was clamped) is frozen as the right-hand side for the push. Solving for the basics
+  // instead would amplify that residual through B^-1, which on the 467k-row LP moved basic
+  // values by up to 6e9 and stalled the push at infeasible blockers.
+  push_rhs_.resize(static_cast<std::size_t>(m_));
+  for (Index i = 0; i < m_; ++i) push_rhs_[i] = activity[i] - x_[n_ + i];
+  for (Index j = 0; j < nt_; ++j) {
+    status_[j] = normalized_status(j, start[j]);
+    position_[j] = -1;
+    if (status_[j] == VarStatus::kBasic) {
+      basic_[pos] = j;
+      position_[j] = pos++;
+    }
+  }
+  SimplexStatus pushed = SimplexStatus::kNumericalError;
+  // No recomputation: the basics keep the point's values (rank repair keeps them too).
+  if (rebuild(RebuildReason::kInitial, false)) pushed = push_to_vertex();
+  pushing_ = false;
+  push_rhs_.clear();
+  stats_.push_seconds = push_timer.seconds();
+  warm_start_setup_ = false;
+  if (pushed == SimplexStatus::kNumericalError) {
+    // A failed push still leaves today's warm start from the statuses, within the time left
+    // (solve_warm restarts the timer).
+    stats_.push_dual_fallback = true;
+    const double used = timer_.seconds();
+    options_.time_limit -= used;
+    const SimplexStatus status = solve_warm(start);
+    options_.time_limit += used;
+    return status;
+  }
+  if (pushed != SimplexStatus::kOptimal) return pushed;
+
+  stats_.push_max_infeasibility = max_primal_infeasibility();
+  for (Index k = 0; k < m_; ++k) {
+    if (primal_infeasible(basic_[k])) ++stats_.push_infeasible;
+  }
+  compute_dual();  // Original costs; dual correction would destroy the pushed primal point.
+  if (stats_.push_max_infeasibility <= kPrimalDriftAllowance * options_.primal_tol) {
+    stats_.push_primal = true;
+    LoopResult result;
+    const SimplexStatus answer = primal_loop(result);
+    if (result != LoopResult::kLostFeasibility) return answer;
+  }
+  stats_.push_dual_fallback = true;
+  // Shifts only: flipping boxed nonbasics to their other bound would move the basics as far as
+  // the snap the push avoided (on the 467k-row LP, 5k infeasible rows became 225k).
+  correct_dual_infeasibilities(false);
+  skip_rebuild_ = true;
+  return phase2();
+}
+
+SimplexStatus Simplex::push_to_vertex() {
+  struct Pending {
+    double distance;
+    Index index;
+    bool operator<(const Pending& other) const {
+      return distance != other.distance ? distance < other.distance : index > other.index;
+    }
+  };
+  std::vector<Pending> pending;
+  // Ordinary pushes consume a sorted list in O(1). Only infeasible leaving basics need
+  // reinsertion; keep those in a small heap instead of shifting the entire superbasic list.
+  std::priority_queue<Pending> postponed;
+  std::vector<double> target(static_cast<std::size_t>(nt_), 0.0);
+  // Moves nonbasic j to its target without moving the basics: the change goes into the frozen
+  // right-hand side, and only the final recomputation (on the final basis) feels it.
+  const auto absorb = [&](Index j, bool count) {
+    const double delta = target[j] - x_[j];
+    if (delta != 0.0) {
+      for_column(j, [&](Index i, double a) { push_rhs_[i] += a * delta; });
+      if (count) ++stats_.push_absorbed;
+    }
+    x_[j] = target[j];
+  };
+  const auto collect = [&]() {
+    pending.clear();
+    postponed = {};
+    for (Index j = 0; j < nt_; ++j) {
+      if (status_[j] == VarStatus::kBasic) continue;
+      status_[j] = nearest_status(j);
+      target[j] = push_target(j);
+      const double distance = std::fabs(target[j] - x_[j]);
+      if (distance > options_.primal_tol) pending.push_back({distance, j});
+      else absorb(j, true);
+    }
+    std::sort(pending.begin(), pending.end());
+  };
+  collect();
+  stats_.push_superbasics = static_cast<long long>(pending.size());
+  stats_.push_remaining = stats_.push_superbasics;
+  // Pushes of one superbasic blocked at step 0 by an already infeasible basic.
+  std::vector<int> infeasible_blocks(static_cast<std::size_t>(nt_), 0);
+  long long next_report = kPushReportInterval;
+  while (!pending.empty() || !postponed.empty()) {
+    SimplexStatus limit;
+    if (limit_reached(limit)) return limit;
+    const long long work = stats_.push_targets + stats_.push_pivots + stats_.push_absorbed;
+    if (work >= next_report) {
+      next_report = work + kPushReportInterval;
+      double max_rhs = 0.0;
+      for (const double r : push_rhs_) max_rhs = std::max(max_rhs, std::fabs(r));
+      log_.log(2, "push: %lld done, %zu left, pivots %lld (%lld degenerate), infeasible blocks "
+                  "%lld, absorbed %lld, max rhs %.3e, %.1f s",
+               stats_.push_targets + stats_.push_pivots, pending.size() + postponed.size(),
+               stats_.push_pivots, stats_.push_degenerate_pivots, stats_.push_infeasible_blocks,
+               stats_.push_absorbed, max_rhs, timer_.seconds());
+    }
+    Index j;
+    if (pending.empty() || (!postponed.empty() && pending.back() < postponed.top())) {
+      j = postponed.top().index;
+      postponed.pop();
+    } else {
+      j = pending.back().index;
+      pending.pop_back();
+    }
+    if (status_[j] == VarStatus::kBasic) continue;
+    const double distance = std::fabs(target[j] - x_[j]);
+    const double sigma = target[j] >= x_[j] ? 1.0 : -1.0;
+    load_column(j, alpha_col_);
+    factor_.ftran(alpha_col_, &spike_);
+    double relaxed = distance;
+    for (Index k = 0; k < m_; ++k) {
+      const double a = sigma * alpha_col_[k];
+      if (std::fabs(a) <= options_.pivot_tol) continue;
+      const Index b = basic_[k];
+      const double bound = a > 0.0 ? lower_[b] : upper_[b];
+      if (!std::isfinite(bound)) continue;
+      // An already infeasible basic cannot move farther out in this direction.
+      const double gap = (x_[b] - bound) / a;
+      relaxed = std::min(relaxed, gap < 0.0 ? 0.0 : gap + options_.primal_tol / std::fabs(a));
+    }
+    Index r = -1;
+    double step = distance;
+    double largest = 0.0;
+    for (Index k = 0; k < m_; ++k) {
+      const double a = sigma * alpha_col_[k];
+      if (std::fabs(a) <= options_.pivot_tol) continue;
+      const Index b = basic_[k];
+      const double bound = a > 0.0 ? lower_[b] : upper_[b];
+      if (!std::isfinite(bound)) continue;
+      const double ratio = std::max(0.0, (x_[b] - bound) / a);
+      if (ratio < distance && ratio <= relaxed && std::fabs(a) > largest) {
+        r = k;
+        step = ratio;
+        largest = std::fabs(a);
+      }
+    }
+    for (Index k = 0; k < m_; ++k) x_[basic_[k]] -= sigma * step * alpha_col_[k];
+    x_[j] += sigma * step;
+    if (r < 0) {
+      x_[j] = target[j];
+      ++stats_.push_targets;
+    } else {
+      const Index leaving = basic_[r];
+      const double leaving_bound = sigma * alpha_col_[r] > 0.0 ? lower_[leaving] : upper_[leaving];
+      // A basic outside its bound by more than the tolerance blocks at its current value.
+      // Snapping it would break the equations; it stays a superbasic, pushed on a later step.
+      // Within the tolerance (rounding, the Harris overshoot), it is snapped and the difference
+      // absorbed, so the equations stay exact.
+      const double tol = options_.primal_tol;
+      const bool outside = sigma * alpha_col_[r] > 0.0 ? x_[leaving] < leaving_bound - tol
+                                                       : x_[leaving] > leaving_bound + tol;
+      if (outside && step == 0.0) {
+        ++stats_.push_infeasible_blocks;
+        // Swapping infeasible blockers in and out can cycle; after a few such blocks j is
+        // snapped by absorption instead and the basis stays as it is.
+        if (++infeasible_blocks[j] > kMaxInfeasibleBlocks) {
+          absorb(j, true);
+          stats_.push_remaining = static_cast<long long>(pending.size() + postponed.size());
+          continue;
+        }
+      }
+      status_[leaving] = sigma * alpha_col_[r] > 0.0
+                            ? VarStatus::kAtLower : VarStatus::kAtUpper;
+      target[leaving] = leaving_bound;
+      if (outside && step == 0.0) {
+        postponed.push({std::fabs(leaving_bound - x_[leaving]), leaving});
+      } else {
+        absorb(leaving, false);
+      }
+      basic_[r] = j;
+      position_[j] = r;
+      status_[j] = VarStatus::kBasic;
+      position_[leaving] = -1;
+      dse_weight_[r] = 1.0;
+      ++stats_.push_pivots;
+      if (step == 0.0) ++stats_.push_degenerate_pivots;
+      const bool updated = factor_.update(r, spike_);
+      if (!updated || factor_.should_refactor()) {
+        // No recomputation: on an ill-conditioned basis it can amplify rounding into infeasible
+        // basics. The incremental values satisfy the frozen equations, and a rank repair keeps
+        // values too.
+        if (!rebuild(updated ? factor_.refactor_reason() : RebuildReason::kUnsafeUpdate,
+                     false)) {
+          return SimplexStatus::kNumericalError;
+        }
+        // A rank repair can release a new superbasic; recollect only at refactorizations.
+        collect();
+      }
+    }
+    stats_.push_remaining = static_cast<long long>(pending.size() + postponed.size());
+  }
+  std::vector<double> incremental(static_cast<std::size_t>(m_));
+  for (Index k = 0; k < m_; ++k) incremental[k] = x_[basic_[k]];
+  if (!rebuild(RebuildReason::kConfirmation, false)) return SimplexStatus::kNumericalError;
+  compute_primal();  // Still the frozen equations: checks the incremental updates.
+  for (Index k = 0; k < m_; ++k) {
+    const double value = x_[basic_[k]];
+    stats_.push_primal_error = std::max(stats_.push_primal_error,
+        std::fabs(incremental[k] - value) / (1.0 + std::fabs(value)));
+  }
+  for (const double r : push_rhs_) {
+    stats_.push_max_rhs = std::max(stats_.push_max_rhs, std::fabs(r));
+  }
+  // The true equations [A -I] v = 0 on the final basis: the residual now moves the basics by
+  // B^-1 push_rhs_, which the handoff measures as primal infeasibility.
+  pushing_ = false;
+  push_rhs_.clear();
+  compute_primal();
+  stats_.push_remaining = 0;
+  for (Index j = 0; j < nt_; ++j) {
+    if (status_[j] != VarStatus::kBasic && x_[j] != push_target(j)) ++stats_.push_remaining;
+  }
+  // A final rank repair that releases a superbasic cannot be handed to a simplex loop.
+  return stats_.push_remaining == 0 ? SimplexStatus::kOptimal : SimplexStatus::kNumericalError;
 }
 
 // Keeps a nonbasic status consistent with the bounds.

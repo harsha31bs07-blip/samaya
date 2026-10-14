@@ -41,6 +41,24 @@ enum class VarStatus : std::uint8_t { kBasic, kAtLower, kAtUpper, kAtZero };
 // Work counters, mainly for tests and logs: a healthy dual simplex does nearly all of its work in
 // dual iterations, with few cost shifts and little primal cleanup.
 struct SimplexStats {
+  // Push work is counted separately from simplex iterations, but shares their limit.
+  long long push_superbasics = 0;
+  long long push_targets = 0;
+  long long push_pivots = 0;
+  long long push_degenerate_pivots = 0;
+  long long push_refactorizations = 0;
+  long long push_primal_recomputations = 0;
+  long long push_remaining = 0;
+  long long push_infeasible = 0;
+  long long push_absorbed = 0;           // Snaps absorbed into the frozen right-hand side.
+  long long push_infeasible_blocks = 0;  // Step-0 blocks by an already infeasible basic.
+  double push_max_rhs = 0.0;             // Largest residual left at the end of the push.
+  double push_seconds = 0.0;
+  double push_max_infeasibility = 0.0;
+  double push_primal_error = 0.0;  // Incremental versus final recomputed basics, relative.
+  bool push_used = false;
+  bool push_primal = false;
+  bool push_dual_fallback = false;
   long long dual_iterations = 0;
   long long primal_iterations = 0;
   long long bound_flips = 0;
@@ -120,6 +138,8 @@ class Simplex {
   // bounds are restored, dual infeasibilities are removed by bound flips and cost shifts, and the
   // dual simplex continues. Falls back to solve() if the statuses do not form a usable basis.
   SimplexStatus solve(const std::vector<VarStatus>& start);
+  // Preserve the n structural values, push nonbasics to bounds, then finish by simplex.
+  SimplexStatus solve(const std::vector<VarStatus>& start, const std::vector<double>& values);
 
   // All vectors are in the (scaled) space of the LpProblem.
   const std::vector<double>& values() const { return x_; }         // n + m.
@@ -155,7 +175,12 @@ class Simplex {
   void finish_profile();
   SimplexStatus solve_cold();
   SimplexStatus solve_warm(const std::vector<VarStatus>& start);
-  bool rebuild(BasisFactor::RebuildReason reason = BasisFactor::RebuildReason::kPhase);
+  SimplexStatus solve_push(const std::vector<VarStatus>& start, const std::vector<double>& values);
+  SimplexStatus push_to_vertex();
+  VarStatus nearest_status(Index j) const;
+  double push_target(Index j) const;
+  bool rebuild(BasisFactor::RebuildReason reason = BasisFactor::RebuildReason::kPhase,
+               bool recompute = true);
   bool update_factor(Index position);
   bool sample_iteration();
   VarStatus normalized_status(Index j, VarStatus st) const;
@@ -164,7 +189,9 @@ class Simplex {
   void compute_pivot_row();
   void set_value_from_status(Index j);
   void place_nonbasic_dual_feasible();
-  bool correct_dual_infeasibilities();
+  // Removes dual infeasibilities by flipping boxed nonbasics to their other bound and shifting
+  // the costs of the others; flip_boxed = false shifts every cost, keeping the primal values.
+  bool correct_dual_infeasibilities(bool flip_boxed = true);
   void perturb_costs(double base);
   Index count_dual_infeasibilities_unboxed() const;
   double max_primal_infeasibility() const;
@@ -206,6 +233,10 @@ class Simplex {
   // values are current, so the first dual loop of phase 2 does not factorize again.
   bool factor_valid_ = false;
   bool skip_rebuild_ = false;
+  bool pushing_ = false;  // Rank repair preserves leaving values during the push.
+  // Right-hand side of [A -I] v = push_rhs_ during the push (the start point's residual plus the
+  // absorbed snaps); empty otherwise.
+  std::vector<double> push_rhs_;
   std::vector<Index> basic_;
   std::vector<Index> position_;
   std::vector<VarStatus> status_;
