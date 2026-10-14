@@ -22,6 +22,8 @@ constexpr double kImpliedFreeErrorTol = 1e-12;
 constexpr double kSubstitutionResidualRatio = 1e-9;
 constexpr Index kSubstitutionRowLength = 10;  // Bound the first version's equation work.
 constexpr Index kSubstitutionColLength = 10;  // Bound the number of other rows updated.
+// Bound the extra activity work when proving a candidate's bounds from its other rows.
+constexpr Index kImpliedBoundRowLength = 1000;
 constexpr Index kSubstitutionFillLimit = 10;  // Follows HiGHS's default; not tuned.
 constexpr double kIntegerDataLimit = 2147483648.0;  // Exact integer arithmetic fits int64_t.
 constexpr double kBoundRoundoff = 4.0 * 0x1p-52;
@@ -207,24 +209,32 @@ void Presolve::other_activity_bounds(Index i, Index j, ActivitySide& lower,
                                      ActivitySide& upper) const {
   lower = {};
   upper = {};
-  const auto add = [](ActivitySide& side, double term) {
+  // Exactness: a zero FMA residual for each product and a zero Knuth two-sum error for each
+  // addition mean the finite sum equals the true activity bound (FP contraction is off).
+  const auto add = [](ActivitySide& side, double a, double bound) {
+    const double term = a * bound;
     if (std::isinf(term)) {
       ++side.infinite;
-    } else {
-      side.sum += term;
-      side.magnitude += std::fabs(term);
+      return;
     }
+    const double sum = side.sum + term;
+    const double term_part = sum - side.sum;
+    const double error = (side.sum - (sum - term_part)) + (term - term_part);
+    side.exact = side.exact && std::fma(a, bound, -term) == 0.0 && error == 0.0;
+    side.sum = sum;
+    side.magnitude += std::fabs(term);
   };
   // Never subtract the singleton's contribution from an activity that may be infinite.
   for (const auto& e : rows_[i]) {
     const Index k = e.index;
     if (k == j || !col_active_[k]) continue;
-    add(lower, e.a * (e.a > 0.0 ? lower_[k] : upper_[k]));
-    add(upper, e.a * (e.a > 0.0 ? upper_[k] : lower_[k]));
+    add(lower, e.a, e.a > 0.0 ? lower_[k] : upper_[k]);
+    add(upper, e.a, e.a > 0.0 ? upper_[k] : lower_[k]);
   }
 }
 
-bool Presolve::implied_free(Index i, Index j, double a, bool& tolerance_only) const {
+bool Presolve::implied_bound(Index i, Index j, double a, bool lower_side,
+                            bool& tolerance_only) const {
   tolerance_only = false;
   ActivitySide lower, upper;
   other_activity_bounds(i, j, lower, upper);
@@ -240,10 +250,27 @@ bool Presolve::implied_free(Index i, Index j, double a, bool& tolerance_only) co
                                                        : kInf / a;
   if (a < 0.0) std::swap(lo, up);
   if (std::isnan(lo) || std::isnan(up) || lo > up) return false;
-  const bool prove_lower = lower_[j] != -kInf;
-  const bool prove_upper = upper_[j] != kInf;
-  if ((prove_lower && (!std::isfinite(lo) || !(lo >= lower_[j]))) ||
-      (prove_upper && (!std::isfinite(up) || !(up <= upper_[j])))) return false;
+  const double bound = lower_side ? lower_[j] : upper_[j];
+  if (bound == (lower_side ? -kInf : kInf)) return true;
+  const double implied = lower_side ? lo : up;
+  if (!std::isfinite(implied) || !(lower_side ? implied >= bound : implied <= bound)) return false;
+
+  // The side of the activity and the row bound this implied bound came from.
+  const bool from_upper_activity = lower_side == (a > 0.0);
+  const ActivitySide& side = from_upper_activity ? upper : lower;
+  const double row_bound = from_upper_activity ? rl : ru;
+  // When the activity sum, the subtraction and the division were all exact, implied is the
+  // true implied bound and equality proves the column bound redundant: the common case of
+  // integral data, e.g. x <= 1 implied by x + y <= 1 with y >= 0. Otherwise the outward
+  // allowance below decides.
+  if (side.exact) {
+    // Knuth's two-sum of row_bound and -side.sum, then the division's FMA residual.
+    const double diff = row_bound - side.sum;
+    const double sum_part = diff - row_bound;
+    const double error = (row_bound - (diff - sum_part)) + (-side.sum - sum_part);
+    const bool exact = error == 0.0 && std::fma(a, implied, -diff) == 0.0;
+    if (exact) return true;
+  }
 
   // Include the row bound in the subtraction's magnitude and the column bound in the
   // comparison's scale. Round the shrunken bounds inward so addition cannot erase the margin.
@@ -252,14 +279,22 @@ bool Presolve::implied_free(Index i, Index j, double a, bool& tolerance_only) co
                                  : std::fabs(ru) + lower.magnitude;
   const double up_scale = a > 0.0 ? std::fabs(ru) + lower.magnitude
                                  : std::fabs(rl) + upper.magnitude;
-  const double lo_error = kImpliedFreeErrorTol * (lo_scale / abs_a + std::fabs(lower_[j]));
-  const double up_error = kImpliedFreeErrorTol * (up_scale / abs_a + std::fabs(upper_[j]));
-  const bool lower_ok = !prove_lower ||
-      (std::isfinite(lo_error) && lo >= std::nextafter(lower_[j] + lo_error, kInf));
-  const bool upper_ok = !prove_upper ||
-      (std::isfinite(up_error) && up <= std::nextafter(upper_[j] - up_error, -kInf));
-  tolerance_only = !lower_ok || !upper_ok;
+  const double scale = lower_side ? lo_scale : up_scale;
+  const double error = kImpliedFreeErrorTol * (scale / abs_a + std::fabs(bound));
+  const bool ok = std::isfinite(error) && (lower_side
+      ? implied >= std::nextafter(bound + error, kInf)
+      : implied <= std::nextafter(bound - error, -kInf));
+  tolerance_only = !ok;
   return !tolerance_only;
+}
+
+bool Presolve::implied_free(Index i, Index j, double a, bool& tolerance_only) const {
+  bool lower_tolerance = false, upper_tolerance = false;
+  const bool lower_ok = implied_bound(i, j, a, true, lower_tolerance);
+  const bool upper_ok = implied_bound(i, j, a, false, upper_tolerance);
+  tolerance_only = !(lower_ok && upper_ok) &&
+      (lower_ok || lower_tolerance) && (upper_ok || upper_tolerance);
+  return lower_ok && upper_ok;
 }
 
 bool Presolve::process_rows(bool& changed) {
@@ -818,6 +853,7 @@ bool Presolve::process_substitutions(bool& changed) {
       largest = std::max(largest, std::fabs(e.a));
     }
     Entry pivot{-1, 0.0};
+    bool pivot_other_rows = false;
     const auto integer = [&](Index j) { return options_.mip && is_int(j); };
     const auto prefer = [&](const Entry& e, const Entry& f) {
       if (integer(e.index) != integer(f.index)) return !integer(e.index);
@@ -861,14 +897,48 @@ bool Presolve::process_substitutions(bool& changed) {
           continue;
         }
       }
-      // Bounds can change between equations and passes: prove this candidate afresh.
-      bool tolerance_only = false;
-      if (!implied_free(i, e.index, e.a, tolerance_only)) {
-        if (tolerance_only) ++stats_.substitution_rejected_by_tolerance;
-        else ++stats_.substitution_rejected_not_implied_free;
+      // The proof is made right before the substitution and never stored. After the
+      // substitution x is in no row, so no later proof can rest on x's dropped bounds;
+      // every dropped bound rests on bounds that are still explicit or on columns
+      // substituted later, so the chain has no cycle. Do not cache or reuse implied bounds.
+      bool lower_tolerance = false, upper_tolerance = false;
+      bool lower_ok = implied_bound(i, e.index, e.a, true, lower_tolerance);
+      bool upper_ok = implied_bound(i, e.index, e.a, false, upper_tolerance);
+      bool other_rows = false;
+      for (const auto& f : cols_[e.index]) {
+        if (lower_ok && upper_ok) break;
+        const Index r = f.index;
+        if (r == i || !row_active_[r]) continue;
+        if (row_count_[r] > kImpliedBoundRowLength) {
+          ++stats_.substitution_proof_rows_skipped;
+          continue;
+        }
+        bool tolerance_only = false;
+        if (!lower_ok) {
+          lower_ok = implied_bound(r, e.index, f.a, true, tolerance_only);
+          lower_tolerance = lower_tolerance || tolerance_only;
+          other_rows = other_rows || lower_ok;
+        }
+        if (!upper_ok) {
+          upper_ok = implied_bound(r, e.index, f.a, false, tolerance_only);
+          upper_tolerance = upper_tolerance || tolerance_only;
+          other_rows = other_rows || upper_ok;
+        }
+      }
+      if (!lower_ok || !upper_ok) {
+        // Every row tried failed the rigorous proof; classify a tolerance rejection only
+        // when both sides have a nominal proof (possibly supplied by different rows).
+        if ((lower_ok || lower_tolerance) && (upper_ok || upper_tolerance)) {
+          ++stats_.substitution_rejected_by_tolerance;
+        } else {
+          ++stats_.substitution_rejected_not_implied_free;
+        }
         continue;
       }
-      if (pivot.index < 0 || prefer(e, pivot)) pivot = e;
+      if (pivot.index < 0 || prefer(e, pivot)) {
+        pivot = e;
+        pivot_other_rows = other_rows;
+      }
     }
     if (pivot.index < 0) continue;
     const Index x = pivot.index;
@@ -975,6 +1045,7 @@ bool Presolve::process_substitutions(bool& changed) {
     remove_col(x);
     if (integer(x)) ++stats_.substitution_integer_cols;
     else ++stats_.substitution_continuous_cols;
+    if (pivot_other_rows) ++stats_.substitution_implied_by_other_rows;
     changed = true;
   }
   return true;

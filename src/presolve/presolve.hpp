@@ -51,6 +51,8 @@ struct PresolveStats {
   Index doubleton_rejected_nonfinite = 0;
   Index substitution_continuous_cols = 0;
   Index substitution_integer_cols = 0;
+  Index substitution_implied_by_other_rows = 0;
+  Index substitution_proof_rows_skipped = 0;
   Index substitution_rejected_row_length = 0;
   Index substitution_rejected_col_length = 0;
   Index substitution_rejected_not_implied_free = 0;
@@ -170,8 +172,10 @@ class Presolve {
     double sum = 0.0;
     double magnitude = 0.0;
     Index infinite = 0;
+    bool exact = true;  // Every finite product and partial sum was computed without rounding.
   };
   void other_activity_bounds(Index i, Index j, ActivitySide& lower, ActivitySide& upper) const;
+  bool implied_bound(Index i, Index j, double a, bool lower_side, bool& tolerance_only) const;
   bool implied_free(Index i, Index j, double a, bool& tolerance_only) const;
 
   bool process_cols(bool& changed);

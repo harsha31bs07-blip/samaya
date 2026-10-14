@@ -624,12 +624,18 @@ TEST(presolve_implied_free_one_sided_row_and_column_bounds) {
 }
 
 TEST(presolve_implied_free_error_allowance) {
+  // x0 + 0.1 x1 = 10 with x1 in [10, 40]: 0.1 * 10 and 0.1 * 40 round, so the implied range
+  // [6, 9] is not computed exactly and a bound within the allowance of it is not proved.
   for (const bool lower : {true, false}) {
     Model model = implied_singleton_lp();
+    model.col_lower[1] = 10.0;
+    model.col_upper[1] = 40.0;
+    model.A = samaya::SparseMatrix::from_triplets(1, 2, {{0, 0, 1.0}, {0, 1, 0.1}});
+    REQUIRE(std::fma(0.1, 40.0, -0.1 * 40.0) != 0.0 && std::fma(0.1, 10.0, -0.1 * 10.0) != 0.0);
     if (lower) {
       model.col_lower[0] = 6.0 - 6e-13;
     } else {
-      model.col_upper[0] = 10.0 + 1e-12;
+      model.col_upper[0] = 9.0 + 1e-12;
     }
     Presolve p(model);
     REQUIRE(p.run() == PresolveStatus::kReduced);
@@ -637,6 +643,29 @@ TEST(presolve_implied_free_error_allowance) {
     CHECK(p.stats().implied_free_rejected_by_tolerance > 0);
     check_implied_postsolve(model, p);
   }
+}
+
+TEST(presolve_implied_free_exact_equality_proves_bound) {
+  // x0 + x1 = 10 with x1 in [0, 4]: the implied range [6, 10] is computed exactly, so bounds
+  // equal to it (or looser by less than any allowance) are proved redundant and C1 fires.
+  for (const int variant : {0, 1, 2}) {
+    Model model = implied_singleton_lp();
+    if (variant == 0) model.col_lower[0] = 6.0;
+    if (variant == 1) model.col_upper[0] = 10.0;
+    if (variant == 2) model.col_lower[0] = 6.0 - 6e-13;
+    Presolve p(model);
+    REQUIRE(p.run() == PresolveStatus::kReduced);
+    CHECK_EQ(p.stats().implied_free_col_singletons, 1);
+    CHECK_EQ(p.stats().implied_free_rejected_by_tolerance, 0);
+    check_implied_postsolve(model, p);
+  }
+  // One ulp inside the exact implied range is not implied.
+  Model tight = implied_singleton_lp();
+  tight.col_lower[0] = std::nextafter(6.0, kInf);
+  Presolve p(tight);
+  REQUIRE(p.run() == PresolveStatus::kReduced);
+  CHECK_EQ(p.stats().implied_free_col_singletons, 0);
+  check_implied_postsolve(tight, p);
 }
 
 namespace {
@@ -1137,6 +1166,22 @@ samaya::PresolveOptions substitution_options(bool mip = false, int passes = 50) 
   return options;
 }
 
+// The equation proves only one side of x; the inequality proves the other side.
+// y and z have nonredundant bounds, so they cannot replace x as the C3 pivot.
+Model two_row_substitution_model(double sign = 1.0, double proof_upper = 1.0, bool mip = false) {
+  Model model;
+  model.obj = {-3.0, -2.0, -0.5, 0.25};
+  model.col_lower = {sign > 0.0 ? -1.0 : -2.0, 0.0, 0.0, 0.0};
+  model.col_upper = {sign > 0.0 ? 2.0 : 1.0, 2.0, 2.0, 1.0};
+  model.col_type.assign(4, mip ? samaya::VarType::kInteger : samaya::VarType::kContinuous);
+  model.row_lower = {4.0, -kInf, -1.0};
+  model.row_upper = {4.0, proof_upper, 1.0};
+  model.A = samaya::SparseMatrix::from_triplets(3, 4,
+      {{0, 0, sign}, {0, 1, 1.0}, {0, 2, 1.0},
+       {1, 0, sign}, {1, 3, 1.0}, {2, 1, 1.0}, {2, 2, -1.0}});
+  return model;
+}
+
 void check_substitution_unchanged(const Model& model, const Presolve& p) {
   REQUIRE(p.reduced().num_rows() == model.num_rows());
   REQUIRE(p.reduced().num_cols() == model.num_cols());
@@ -1243,6 +1288,176 @@ TEST(presolve_substitution_continuous_mip) {
   check_doubleton_reference(model, p, status);
 }
 
+TEST(presolve_substitution_bounds_from_different_rows) {
+  for (const double sign : {1.0, -1.0}) {
+    for (const bool mip : {false, true}) {
+      for (const auto sense : {samaya::ObjSense::kMinimize, samaya::ObjSense::kMaximize}) {
+        Model model = two_row_substitution_model(sign, 1.0, mip);
+        model.sense = sense;
+        Presolve p(model, substitution_options(mip));
+        REQUIRE(samaya::PresolveSubstitutionTestAccess::substitutions(p));
+        CHECK_EQ(p.stats().substitution_implied_by_other_rows, 1);
+        CHECK(std::find(p.col_map().begin(), p.col_map().end(), 0) == p.col_map().end());
+        if (mip) check_doubleton_reference(model, p, PresolveStatus::kReduced);
+        else check_implied_postsolve(model, p);
+
+        // Breaking the other row's proof restores the old C3 rejection.
+        model.row_upper[1] = 5.0;
+        Presolve broken(model, substitution_options(mip));
+        CHECK(!samaya::PresolveSubstitutionTestAccess::substitutions(broken));
+        CHECK_EQ(broken.stats().substitution_implied_by_other_rows, 0);
+        CHECK(broken.stats().substitution_rejected_not_implied_free > 0);
+        check_substitution_unchanged(model, broken);
+        if (mip) check_doubleton_reference(model, broken, PresolveStatus::kReduced);
+        else check_implied_postsolve(model, broken);
+      }
+    }
+  }
+}
+
+TEST(presolve_substitution_other_row_error_allowance) {
+  for (const double sign : {1.0, -1.0}) {
+    // Exact data: the other row implies x's bound exactly (rhs 2) or just inside it, which
+    // proves the bound redundant.
+    for (const double rhs : {2.0, 2.0 - 1e-13}) {
+      const Model model = two_row_substitution_model(sign, rhs);
+      Presolve p(model, substitution_options(false, 1));
+      CHECK(samaya::PresolveSubstitutionTestAccess::substitutions(p));
+      CHECK_EQ(p.stats().substitution_implied_by_other_rows, 1);
+      CHECK_EQ(p.stats().substitution_rejected_by_tolerance, 0);
+      check_implied_postsolve(model, p);
+    }
+    // Inexact data: x + 0.1 w <= 3 with w in [10, 20] gives x <= 3 - 0.1 * 10, and 0.1 * 10
+    // rounds, so the computed bound 2 equal to x's bound is within the allowance: not proved.
+    Model model = two_row_substitution_model(sign, 3.0);
+    model.col_lower[3] = 10.0;
+    model.col_upper[3] = 20.0;
+    model.A = samaya::SparseMatrix::from_triplets(3, 4,
+        {{0, 0, sign}, {0, 1, 1.0}, {0, 2, 1.0},
+         {1, 0, sign}, {1, 3, 0.1}, {2, 1, 1.0}, {2, 2, -1.0}});
+    REQUIRE(std::fma(0.1, 10.0, -0.1 * 10.0) != 0.0);
+    Presolve p(model);
+    CHECK(!samaya::PresolveSubstitutionTestAccess::substitutions(p));
+    CHECK_EQ(p.stats().substitution_implied_by_other_rows, 0);
+    CHECK(p.stats().substitution_rejected_by_tolerance > 0);
+    check_substitution_unchanged(model, p);
+    check_implied_postsolve(model, p);
+  }
+}
+
+TEST(presolve_substitution_other_row_proof_work_limit) {
+  for (const Index length : {1000, 1001}) {
+    Model model = two_row_substitution_model();
+    std::vector<samaya::Triplet> entries = {
+        {0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0}, {1, 0, 1.0},
+        {1, 3, 1.0}, {2, 1, 1.0}, {2, 2, -1.0}};
+    // Extra nonnegative columns leave the other row's upper proof valid.
+    for (Index j = 4; j < length + 2; ++j) entries.push_back({1, j, 1.0});
+    model.obj.resize(length + 2, 0.0);
+    model.col_lower.resize(length + 2, 0.0);
+    model.col_upper.resize(length + 2, 1.0);
+    model.col_type.resize(length + 2, samaya::VarType::kContinuous);
+    model.A = samaya::SparseMatrix::from_triplets(3, length + 2, std::move(entries));
+    Presolve p(model);
+    CHECK(samaya::PresolveSubstitutionTestAccess::substitutions(p) == (length == 1000));
+    CHECK_EQ(p.stats().substitution_implied_by_other_rows, length == 1000 ? 1 : 0);
+    CHECK_EQ(p.stats().substitution_proof_rows_skipped, length == 1000 ? 0 : 1);
+    if (length == 1001) check_substitution_unchanged(model, p);
+  }
+}
+
+TEST(presolve_substitution_two_row_differential) {
+  std::mt19937 rng(14102027);
+  int lp_fired = 0, mip_fired = 0, optimal = 0, infeasible = 0;
+  int lp_pipeline_fired = 0, mip_pipeline_fired = 0;
+  for (const bool mip : {false, true}) {
+    for (int k = 0; k < 600; ++k) {
+      Model model = two_row_substitution_model(k % 2 == 0 ? 1.0 : -1.0, 1.0, mip);
+      model.sense = k % 3 == 0 ? samaya::ObjSense::kMaximize : samaya::ObjSense::kMinimize;
+      for (Index j = 0; j < 4; ++j) {
+        model.obj[j] = std::uniform_int_distribution<int>(-4, 4)(rng) / 2.0;
+      }
+      model.obj_offset = std::uniform_int_distribution<int>(-4, 4)(rng) / 2.0;
+      // y + z can exceed 2, so the equation alone never proves x's bound on that side (an
+      // exactly equal implied bound would be a proof) and the other row is needed.
+      model.col_upper[1] = std::uniform_int_distribution<int>(2, 4)(rng);
+      model.col_upper[2] = std::uniform_int_distribution<int>(1, 4)(rng);
+      model.col_upper[3] = std::uniform_int_distribution<int>(1, 3)(rng);
+      model.row_lower[0] = model.row_upper[0] = model.col_upper[1] + model.col_upper[2];
+      model.row_lower[2] = -4.0;
+      model.row_upper[2] = 4.0;
+      // Keep w coupled in both directions so dominated-column elimination cannot
+      // consume the planted proof row before C3 in the full presolve pipeline.
+      model.row_lower.push_back(1.0);
+      model.row_upper.push_back(kInf);
+      const double sign = k % 2 == 0 ? 1.0 : -1.0;
+      model.A = samaya::SparseMatrix::from_triplets(4, 4,
+          {{0, 0, sign}, {0, 1, 1.0}, {0, 2, 1.0}, {1, 0, sign}, {1, 3, 1.0},
+           {2, 1, 1.0}, {2, 2, -1.0}, {3, 1, 1.0}, {3, 3, 1.0}});
+      if (k % 5 == 0) model.row_upper[1] = -1.0;  // Contradicts x's equation-implied side.
+      samaya::Status expected;
+      double objective;
+      if (mip) {
+        const auto ref = samaya::test::reference_milp(model);
+        REQUIRE(ref.status == samaya::test::ReferenceMilpResult::Status::kOptimal ||
+                ref.status == samaya::test::ReferenceMilpResult::Status::kInfeasible);
+        expected = ref.status == samaya::test::ReferenceMilpResult::Status::kOptimal
+            ? samaya::Status::kOptimal : samaya::Status::kInfeasible;
+        objective = ref.objective;
+      } else {
+        const auto ref = ReferenceLp(model).solve();
+        REQUIRE(ref.status != ReferenceResult::Status::kUnbounded);
+        expected = ref.status == ReferenceResult::Status::kOptimal
+            ? samaya::Status::kOptimal : samaya::Status::kInfeasible;
+        objective = ref.objective;
+      }
+      if (expected == samaya::Status::kOptimal) ++optimal;
+      else ++infeasible;
+      // Exercise the proof before forcing or singleton passes can simplify this family.
+      Presolve direct(model, substitution_options(mip));
+      REQUIRE(samaya::PresolveSubstitutionTestAccess::substitutions(direct));
+      CHECK(direct.stats().substitution_implied_by_other_rows > 0);
+      ++(mip ? mip_fired : lp_fired);
+      if (mip) check_doubleton_reference(model, direct, PresolveStatus::kReduced);
+      else if (expected == samaya::Status::kOptimal) check_implied_postsolve(model, direct);
+      else CHECK(ReferenceLp(direct.reduced()).solve().status == ReferenceResult::Status::kInfeasible);
+      Presolve pipeline(model, substitution_options(mip));
+      const auto status = pipeline.run();
+      if (pipeline.stats().substitution_implied_by_other_rows > 0) {
+        ++(mip ? mip_pipeline_fired : lp_pipeline_fired);
+      }
+      if (mip) check_doubleton_reference(model, pipeline, status);
+      else if (expected == samaya::Status::kOptimal) {
+        REQUIRE(status == PresolveStatus::kReduced);
+        check_implied_postsolve(model, pipeline);
+      } else if (status != PresolveStatus::kInfeasible) {
+        CHECK(ReferenceLp(pipeline.reduced()).solve().status == ReferenceResult::Status::kInfeasible);
+      }
+      for (const bool enabled : {false, true}) {
+        samaya::Params params;
+        params.log_level = 0;
+        params.presolve = enabled;
+        const auto result = samaya::Solver(params).solve(model);
+        CHECK(result.status == expected);
+        if (expected == samaya::Status::kOptimal) {
+          CHECK(result.verified);
+          CHECK_NEAR(result.objective, objective, 1e-7 * (1.0 + std::fabs(objective)));
+          if (!mip) CHECK(samaya::verify_lp_optimality(model, result.col_value, result.row_dual).ok);
+        }
+      }
+    }
+  }
+  CHECK(lp_fired >= 450);
+  CHECK(mip_fired >= 450);
+  CHECK(lp_pipeline_fired >= 450);
+  CHECK(mip_pipeline_fired >= 450);
+  std::printf("  two-row substitution differential: %d optimal, %d infeasible; "
+              "other-row proofs on %d/600 LPs and %d/600 MILPs (presolve on/off)\n",
+              optimal, infeasible, lp_fired, mip_fired);
+  std::printf("  two-row proofs in full presolve: %d/600 LPs and %d/600 MILPs\n",
+              lp_pipeline_fired, mip_pipeline_fired);
+}
+
 TEST(presolve_substitution_exact_zero_removes_entry) {
   Model model = substitution_model();  // x + 2y + 2z = 2.
   model.A = samaya::SparseMatrix::from_triplets(4, 3,
@@ -1283,14 +1498,17 @@ TEST(presolve_substitution_exact_integer_divisibility) {
 }
 
 TEST(presolve_substitution_nonredundant_and_tolerance_bounds) {
+  // x's implied range [-6, 10] is computed exactly from integral data, so a bound equal to it
+  // (or looser) is proved redundant; a tighter one is not. The inexact allowance path is
+  // covered by presolve_implied_free_error_allowance and the other-row allowance test.
   for (const double bound : {1.0, 6.0, 6.0 + 1e-13}) {
-    Model model = substitution_model();  // x's implied range is [-6, 10].
+    Model model = substitution_model();
     model.col_lower[0] = -bound;
     Presolve p(model, substitution_options(false, 1));
     REQUIRE(p.run() == PresolveStatus::kReduced);
-    CHECK_EQ(p.stats().substitution_continuous_cols, 0);
+    CHECK_EQ(p.stats().substitution_continuous_cols, bound == 1.0 ? 0 : 1);
+    CHECK_EQ(p.stats().substitution_rejected_by_tolerance, 0);
     if (bound == 1.0) CHECK(p.stats().substitution_rejected_not_implied_free > 0);
-    else CHECK(p.stats().substitution_rejected_by_tolerance > 0);
     check_implied_postsolve(model, p);
   }
 }

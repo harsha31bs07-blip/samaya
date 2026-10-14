@@ -139,13 +139,14 @@ void log_presolve_stats(const Logger& log, const PresolveStats& st) {
   log.log(2,
           "Presolve substitutions: %d continuous, %d integer; rejected: %d row_length, "
           "%d col_length, %d not_implied_free, %d by_tolerance, %d pivot, %d integer, "
-          "%d nonfinite, %d residual, %d fill",
+          "%d nonfinite, %d residual, %d fill; implied_by_other_rows %d; proof_rows_skipped %d",
           st.substitution_continuous_cols, st.substitution_integer_cols,
           st.substitution_rejected_row_length, st.substitution_rejected_col_length,
           st.substitution_rejected_not_implied_free, st.substitution_rejected_by_tolerance,
           st.substitution_rejected_pivot, st.substitution_rejected_integer,
           st.substitution_rejected_nonfinite, st.substitution_rejected_residual,
-          st.substitution_rejected_fill);
+          st.substitution_rejected_fill, st.substitution_implied_by_other_rows,
+          st.substitution_proof_rows_skipped);
 }
 
 bool solve_presolved_lp(const Model& model, const Params& requested, const Logger& log,

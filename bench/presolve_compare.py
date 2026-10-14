@@ -45,6 +45,8 @@ SUBSTITUTION_COUNTERS = ["substitution_continuous_cols", "substitution_integer_c
                          "substitution_rejected_nonfinite", "substitution_rejected_residual",
                          "substitution_rejected_fill"]
 COUNTERS += SUBSTITUTION_COUNTERS
+SUBSTITUTION_PROOF_COUNTERS = ["substitution_implied_by_other_rows", "substitution_proof_rows_skipped"]
+COUNTERS += SUBSTITUTION_PROOF_COUNTERS
 SIZES = ["rows", "cols", "integers", "nonzeros"]
 FIELDS = (["instance"] + [f"original_{s}" for s in SIZES]
           + ["samaya_status", "samaya_solve_status", "samaya_seconds", "samaya_wall_seconds"]
@@ -87,10 +89,14 @@ def parse_samaya(text: str) -> dict:
     substitutions = re.search(r"Presolve substitutions: (\d+) continuous, (\d+) integer; rejected: "
                               r"(\d+) row_length, (\d+) col_length, (\d+) not_implied_free, "
                               r"(\d+) by_tolerance, (\d+) pivot, (\d+) integer, "
-                              r"(\d+) nonfinite, (\d+) residual, (\d+) fill", text)
+                              r"(\d+) nonfinite, (\d+) residual, (\d+) fill"
+                              r"(?:; implied_by_other_rows (\d+); proof_rows_skipped (\d+))?", text)
     if substitutions:
         result.update(zip([f"samaya_{c}" for c in SUBSTITUTION_COUNTERS],
-                          map(int, substitutions.groups())))
+                          map(int, substitutions.groups()[:len(SUBSTITUTION_COUNTERS)])))
+        if substitutions[12] is not None:
+            result.update(zip([f"samaya_{c}" for c in SUBSTITUTION_PROOF_COUNTERS],
+                              map(int, substitutions.groups()[-2:])))
     if "Presolve: infeasib" in line:
         result["samaya_status"] = "infeasible"
         passes = re.search(r"passes (\d+)", line)
@@ -301,6 +307,11 @@ def self_test() -> None:
         assert [parsed[f"samaya_{c}"] for c in SUBSTITUTION_COUNTERS] == list(range(22, 33))
         assert [parsed[f"samaya_{c}"] for c in DOUBLETON_COUNTERS] == list(range(13, 22))
         assert parsed["samaya_implied_free_rejected_by_tolerance"] == 12
+        assert all(f"samaya_{c}" not in parsed for c in SUBSTITUTION_PROOF_COUNTERS)
+        extended = substitutions.rstrip() + "; implied_by_other_rows 33; proof_rows_skipped 34\n"
+        parsed = parse_samaya(mode + counters + doubletons + extended)
+        assert [parsed[f"samaya_{c}"] for c in SUBSTITUTION_COUNTERS] == list(range(22, 33))
+        assert [parsed[f"samaya_{c}"] for c in SUBSTITUTION_PROOF_COUNTERS] == [33, 34]
     lp = parse_samaya("Presolve: 20 rows, 30 cols -> 4 rows, 5 cols, 9 nonzeros (2 passes); "
                        "original_nonzeros 80; presolve_seconds 2e-3\n" + counters)
     assert lp["samaya_status"] == "reduced" and lp["samaya_integers"] == 0
@@ -317,7 +328,7 @@ def self_test() -> None:
     assert parse_samaya("Presolve: 2 rows, 3 cols (1 integer) -> 1 rows, 2 cols (1 integer)")["samaya_status"] == "failed"
     assert parse_samaya("Presolve: 20 rows, 30 cols -> 4 rows, 5 cols, 9 nonzeros (2 passes); "
                         "original_nonzeros 80; presolve_seconds 0.1")["samaya_status"] == "failed"
-    print("self-test: PASS (LP, MIP, C1/C2/C3 counters, infeasibility, missing and legacy logs)")
+    print("self-test: PASS (LP, MIP, C1/C2/C3/C3b counters, infeasibility, missing and legacy logs)")
 
 
 def main() -> int:
