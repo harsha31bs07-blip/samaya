@@ -19,6 +19,64 @@ const char* to_string(SimplexStatus status) {
 
 namespace {
 
+using Component = SimplexStats::Component;
+using RebuildReason = BasisFactor::RebuildReason;
+
+// One clock read per boundary; unclassified work is obtained from the solve's wall time.
+// Segments marked rest do not accumulate, so nested rebuild/flip timers cannot double count.
+class ProfileTimer {
+ public:
+  ProfileTimer(bool enabled, SimplexStats& stats, Component component,
+               double* maximum = nullptr, bool iteration = false)
+      : enabled_(enabled), stats_(stats), component_(component), maximum_(maximum),
+        iteration_(iteration) {
+    if (enabled_) {
+      if (iteration_) initial_measured_ = measured_seconds();
+      start_ = first_start_ = std::chrono::steady_clock::now();
+    }
+  }
+  ~ProfileTimer() {
+    switch_to(Component::kRest);
+    if (enabled_ && iteration_) {
+      // The enclosing iteration owns unclassified time. Subtract its measured segments and
+      // nested flip/update/rebuild timers, so refreshes cannot be counted twice.
+      const double wall = std::chrono::duration<double>(start_ - first_start_).count();
+      stats_.seconds[static_cast<std::size_t>(Component::kRest)] +=
+          std::max(0.0, wall - (measured_seconds() - initial_measured_));
+    }
+    if (enabled_ && maximum_ != nullptr) *maximum_ = std::max(*maximum_, elapsed_);
+  }
+  void switch_to(Component component) {
+    if (!enabled_) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (component_ != Component::kRest) {
+      const double seconds = std::chrono::duration<double>(now - start_).count();
+      stats_.seconds[static_cast<std::size_t>(component_)] += seconds;
+      elapsed_ += seconds;
+    }
+    start_ = now;
+    component_ = component;
+  }
+
+ private:
+  double measured_seconds() const {
+    double sum = 0.0;
+    for (std::size_t k = 0; k < static_cast<std::size_t>(Component::kRest); ++k) {
+      sum += stats_.seconds[k];
+    }
+    return sum;
+  }
+  bool enabled_;
+  SimplexStats& stats_;
+  Component component_;
+  double* maximum_;
+  bool iteration_;
+  double elapsed_ = 0.0;
+  double initial_measured_ = 0.0;
+  std::chrono::steady_clock::time_point start_{};
+  std::chrono::steady_clock::time_point first_start_{};
+};
+
 constexpr double kMinDseWeight = 1e-4;
 constexpr double kPhase1FreeBound = 1000.0;
 constexpr double kPerturbationBase = 5e-7;
@@ -27,9 +85,10 @@ constexpr double kFeasibilityCostBase = 1e-3;
 // (btran) that triggers a refactorization.
 constexpr double kPivotConsistencyTol = 1e-7;
 
-BasisFactor::Options factor_options(const SimplexOptions& options) {
+BasisFactor::Options factor_options(const SimplexOptions& options, const Logger& log) {
   BasisFactor::Options f;
   f.max_updates = options.refactor_interval;
+  f.collect_stats = options.collect_stats || log.enabled(2);
   return f;
 }
 
@@ -47,7 +106,7 @@ Simplex::Simplex(const LpProblem& lp, const SimplexOptions& options, const Logge
       m_(lp.m),
       n_(lp.n),
       nt_(lp.n + lp.m),
-      factor_(lp.A, factor_options(options)),
+      factor_(lp.A, factor_options(options, log)),
       rng_(options.seed) {
   set_iteration_limit(options.max_iterations);
   const auto m = static_cast<std::size_t>(m_);
@@ -91,10 +150,13 @@ void Simplex::set_value_from_status(Index j) {
   }
 }
 
-bool Simplex::rebuild() {
+bool Simplex::rebuild(RebuildReason reason) {
+  if (profile_) ++stats_.rebuild_calls;
+  const ProfileTimer measurement(profile_, stats_, Component::kRebuild,
+                                 &stats_.max_rebuild_seconds);
   for (int attempt = 0; attempt < 4; ++attempt) {
     ++stats_.refactorizations;
-    if (factor_.factorize(basic_) == 0) {
+    if (factor_.factorize(basic_, attempt == 0 ? reason : RebuildReason::kRankRepair) == 0) {
       compute_primal();
       compute_dual();
       factor_valid_ = true;
@@ -109,6 +171,10 @@ bool Simplex::rebuild() {
       const Index entering = n_ + rows[k];
       const Index leaving = basic_[pos];
       if (position_[entering] != -1) return false;
+      if (profile_) {
+        ++stats_.rank_repairs;
+        if (warm_start_setup_) ++stats_.warm_start_rank_repairs;
+      }
       const bool has_lower = lower_[leaving] > -kInf;
       const bool has_upper = upper_[leaving] < kInf;
       if (has_lower && (!has_upper || std::fabs(x_[leaving] - lower_[leaving]) <=
@@ -169,9 +235,11 @@ void Simplex::compute_pivot_row() {
   const auto start = lp_.At.col_start();
   const auto index = lp_.At.row_index();
   const auto value = lp_.At.values();
+  long long rho_nnz = 0;
   for (Index i = 0; i < m_; ++i) {
     const double r = rho_[i];
     if (r == 0.0) continue;
+    ++rho_nnz;
     for (NnzIndex p = start[i]; p < start[i + 1]; ++p) {
       const Index j = index[p];
       if (!in_row_nz_[j]) {
@@ -184,6 +252,7 @@ void Simplex::compute_pivot_row() {
     row_nz_.push_back(n_ + i);
     alpha_row_[n_ + i] = -r;
   }
+  if (profile_) stats_.rho_nnz.add(rho_nnz);
 }
 
 void Simplex::place_nonbasic_dual_feasible() {
@@ -222,9 +291,11 @@ bool Simplex::correct_dual_infeasibilities() {
       status_[j] = dj >= 0.0 ? VarStatus::kAtLower : VarStatus::kAtUpper;
       set_value_from_status(j);
       flipped = true;
+      if (profile_ && warm_start_setup_) ++stats_.warm_start_bound_flips;
     } else {
       // Shift the cost so that d_j = 0; shifts are removed before optimality is declared.
       ++stats_.cost_shifts;
+      if (profile_ && warm_start_setup_) ++stats_.warm_start_cost_shifts;
       cost_[j] -= dj;
       d_[j] = 0.0;
     }
@@ -355,8 +426,15 @@ Index Simplex::dual_ratio_test(double direction, double slope) {
     if (candidate) candidates_.push_back(j);
   }
 
+  if (profile_) stats_.ratio_candidates.add(static_cast<long long>(candidates_.size()));
+  long long groups = 0;
+  const auto finish = [&](Index entering) {
+    if (profile_) stats_.harris_groups.add(groups);
+    return entering;
+  };
   std::size_t remaining = candidates_.size();
   while (remaining > 0) {
+    ++groups;
     // Harris pass 1: largest step keeping every remaining d_j feasible within the tolerance.
     double max_step = kInf;
     for (std::size_t k = 0; k < remaining; ++k) {
@@ -380,7 +458,7 @@ Index Simplex::dual_ratio_test(double direction, double slope) {
     }
     // Stop at this group once the remaining infeasibility would be within the tolerance: the row
     // becomes feasible at (or numerically at) this breakpoint.
-    if (!(slope - reduction > options_.primal_tol)) return best;
+    if (!(slope - reduction > options_.primal_tol)) return finish(best);
 
     // Pass the whole group: its variables flip to their other bounds.
     for (std::size_t k = 0; k < remaining;) {
@@ -396,20 +474,28 @@ Index Simplex::dual_ratio_test(double direction, double slope) {
   }
   // Even with every candidate flipped the leaving row stays infeasible: no entering variable.
   flips_.clear();
-  return -1;
+  return finish(-1);
 }
 
 void Simplex::apply_flips() {
   // Flipping boxed nonbasic variables changes x_B by -B^-1 (sum_j a_j * change_j).
   std::vector<double> column(static_cast<std::size_t>(m_), 0.0);
+  long long rhs_nnz = 0;
   for (const Index j : flips_) {
     const double old_value = x_[j];
     status_[j] = status_[j] == VarStatus::kAtUpper ? VarStatus::kAtLower : VarStatus::kAtUpper;
     set_value_from_status(j);
     const double change = x_[j] - old_value;
-    for_column(j, [&](Index i, double a) { column[i] += a * change; });
+    for_column(j, [&](Index i, double a) {
+      const double old = column[i];
+      column[i] += a * change;
+      if (profile_) rhs_nnz += (column[i] != 0.0) - (old != 0.0);
+    });
   }
+  if (profile_) stats_.flip_rhs_nnz.add(rhs_nnz);
+  ProfileTimer measurement(time_iteration_, stats_, Component::kFlipFtran);
   factor_.ftran(column);
+  measurement.switch_to(Component::kPrimalUpdate);
   for (Index k = 0; k < m_; ++k) x_[basic_[k]] -= column[k];
   stats_.bound_flips += static_cast<long long>(flips_.size());
 }
@@ -447,8 +533,8 @@ SimplexStatus Simplex::dual_loop() {
   }
   correct_dual_infeasibilities();
   bool fresh = true;
-  const auto refresh = [&] {
-    if (!rebuild()) return false;
+  const auto refresh = [&](RebuildReason reason) {
+    if (!rebuild(reason)) return false;
     correct_dual_infeasibilities();
     fresh = true;
     return true;
@@ -457,9 +543,14 @@ SimplexStatus Simplex::dual_loop() {
   for (;;) {
     SimplexStatus limit;
     if (limit_reached(limit)) return limit;
-    if (factor_.should_refactor() && !refresh()) return SimplexStatus::kNumericalError;
+    if (factor_.should_refactor() && !refresh(factor_.refactor_reason())) {
+      return SimplexStatus::kNumericalError;
+    }
 
+    time_iteration_ = sample_iteration();
+    ProfileTimer measurement(time_iteration_, stats_, Component::kChuzr, nullptr, true);
     const Index r = choose_leaving_row();
+    measurement.switch_to(Component::kRest);
     if (r < 0) {
       if (fresh) return SimplexStatus::kOptimal;
       // Confirm optimality on values recomputed from scratch with the current factorization
@@ -476,43 +567,53 @@ SimplexStatus Simplex::dual_loop() {
     const double bound = to_lower ? lower_[p] : upper_[p];
     const double direction = to_lower ? -1.0 : 1.0;
 
+    measurement.switch_to(Component::kBtran);
     rho_.assign(static_cast<std::size_t>(m_), 0.0);
     rho_[r] = 1.0;
     factor_.btran(rho_);
+    measurement.switch_to(Component::kPivotRow);
     compute_pivot_row();
+    measurement.switch_to(Component::kRest);
 
+    measurement.switch_to(Component::kRatioTest);
     const Index q = dual_ratio_test(direction, std::fabs(x_[p] - bound));
+    measurement.switch_to(Component::kRest);
     if (q < 0) {
       if (!fresh) {
-        if (!refresh()) return SimplexStatus::kNumericalError;
+        if (!refresh(RebuildReason::kNumerical)) return SimplexStatus::kNumericalError;
         continue;
       }
       dual_ray_ = rho_;
       return SimplexStatus::kInfeasible;
     }
 
+    measurement.switch_to(Component::kEnteringFtran);
     load_column(q, alpha_col_);
-    factor_.ftran(alpha_col_, &spike_);
+    factor_.ftran(alpha_col_, &spike_, profile_ ? &stats_.alpha_col_nnz : nullptr);
+    measurement.switch_to(Component::kRest);
     const double a_col = alpha_col_[r];
     const double a_row = alpha_row_[q];
     if (std::fabs(a_col - a_row) > kPivotConsistencyTol * (1.0 + std::fabs(a_col))) {
       if (!fresh) {
         ++stats_.rebuilds_on_mismatch;
-        if (!refresh()) return SimplexStatus::kNumericalError;
+        if (!refresh(RebuildReason::kMismatch)) return SimplexStatus::kNumericalError;
         continue;
       }
       log_.log(3, "simplex: pivot mismatch %.3e vs %.3e after refactor", a_col, a_row);
     }
     if (std::fabs(a_col) < 1e-11) return SimplexStatus::kNumericalError;
 
+    measurement.switch_to(Component::kDseFtran);
     tau_ = rho_;
-    factor_.ftran(tau_);
+    factor_.ftran(tau_, nullptr, profile_ ? &stats_.tau_nnz : nullptr);
+    measurement.switch_to(Component::kRest);
 
     // Bound flips from the long-step ratio test move x_B; the leaving variable stays infeasible
     // on the same side, so its distance to the bound is taken afterwards.
     if (!flips_.empty()) apply_flips();
     const double delta = x_[p] - bound;
 
+    measurement.switch_to(Component::kDualUpdate);
     // Dual step. A slightly infeasible d_q would make the step go the wrong way; shift its cost
     // instead so the step is zero.
     double theta_d = d_[q] / a_row;
@@ -529,12 +630,14 @@ SimplexStatus Simplex::dual_loop() {
     d_[q] = 0.0;
     d_[p] = -theta_d;
 
+    measurement.switch_to(Component::kPrimalUpdate);
     // Primal step: p moves exactly to the violated bound.
     const double theta_p = delta / a_col;
     for (Index k = 0; k < m_; ++k) x_[basic_[k]] -= theta_p * alpha_col_[k];
     x_[q] += theta_p;
     x_[p] = bound;
 
+    measurement.switch_to(Component::kDseUpdate);
     // Dual steepest-edge weights (Forrest–Goldfarb update). The pivot row's weight is known
     // exactly as ||rho||^2; using it instead of the updated value keeps rounding errors from
     // accumulating in the recurrence.
@@ -547,6 +650,7 @@ SimplexStatus Simplex::dual_loop() {
           std::max(dse_weight_[k] + ratio * (ratio * w_r - 2.0 * tau_[k]), kMinDseWeight);
     }
     dse_weight_[r] = std::max(w_r / (a_col * a_col), kMinDseWeight);
+    measurement.switch_to(Component::kRest);
 
     basic_[r] = q;
     position_[q] = r;
@@ -555,9 +659,13 @@ SimplexStatus Simplex::dual_loop() {
     status_[p] = (to_lower || lower_[p] == upper_[p]) ? VarStatus::kAtLower : VarStatus::kAtUpper;
     ++iterations_;
     ++stats_.dual_iterations;
-    if (factor_.update(r, spike_)) {
+    if (profile_) {
+      if (dual_phase1_) ++stats_.dual_phase1_iterations;
+      else ++stats_.dual_phase2_iterations;
+    }
+    if (update_factor(r)) {
       fresh = false;
-    } else if (!refresh()) {
+    } else if (!refresh(RebuildReason::kUnsafeUpdate)) {
       return SimplexStatus::kNumericalError;
     }
   }
@@ -569,8 +677,8 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
   // Devex reference framework: the current nonbasic variables.
   std::fill(devex_weight_.begin(), devex_weight_.end(), 1.0);
   bool fresh = true;
-  const auto refresh = [&] {
-    if (!rebuild()) return false;
+  const auto refresh = [&](RebuildReason reason) {
+    if (!rebuild(reason)) return false;
     fresh = true;
     return true;
   };
@@ -587,26 +695,31 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
     SimplexStatus limit;
     if (limit_reached(limit)) return limit;
     if (factor_.should_refactor()) {
-      if (!refresh()) return SimplexStatus::kNumericalError;
+      if (!refresh(factor_.refactor_reason())) return SimplexStatus::kNumericalError;
       if (max_primal_infeasibility() > drift_tol) {
         result = LoopResult::kLostFeasibility;
         return SimplexStatus::kOptimal;
       }
     }
 
+    time_iteration_ = sample_iteration();
+    ProfileTimer measurement(time_iteration_, stats_, Component::kRest, nullptr, true);
     const Index q = choose_entering_column();
     if (q < 0) {
       if (!fresh) {
-        if (!refresh()) return SimplexStatus::kNumericalError;
+        if (!refresh(RebuildReason::kConfirmation)) return SimplexStatus::kNumericalError;
         continue;
       }
       if (max_primal_infeasibility() > ptol) result = LoopResult::kLostFeasibility;
       return SimplexStatus::kOptimal;
     }
     const double dir = d_[q] < 0.0 ? 1.0 : -1.0;
+    measurement.switch_to(Component::kEnteringFtran);
     load_column(q, alpha_col_);
-    factor_.ftran(alpha_col_, &spike_);
+    factor_.ftran(alpha_col_, &spike_, profile_ ? &stats_.alpha_col_nnz : nullptr);
+    measurement.switch_to(Component::kRest);
 
+    measurement.switch_to(Component::kRatioTest);
     // Harris two-pass ratio test on x_B(t) = x_B - t * dir * alpha.
     double max_step = kInf;
     for (Index k = 0; k < m_; ++k) {
@@ -643,10 +756,11 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
       }
     }
     const double range = upper_[q] - lower_[q];
+    measurement.switch_to(Component::kRest);
 
     if (r < 0 && !(range < kInf)) {
       if (!fresh) {
-        if (!refresh()) return SimplexStatus::kNumericalError;
+        if (!refresh(RebuildReason::kNumerical)) return SimplexStatus::kNumericalError;
         continue;
       }
       primal_ray_.assign(static_cast<std::size_t>(nt_), 0.0);
@@ -656,12 +770,15 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
     }
 
     if (range <= step) {
+      measurement.switch_to(Component::kPrimalUpdate);
       // Bound flip of the entering variable; the basis is unchanged.
       for (Index k = 0; k < m_; ++k) x_[basic_[k]] -= dir * range * alpha_col_[k];
       status_[q] = status_[q] == VarStatus::kAtLower ? VarStatus::kAtUpper : VarStatus::kAtLower;
       set_value_from_status(q);
       ++iterations_;
       ++stats_.primal_iterations;
+      if (profile_) ++stats_.primal_cleanup_iterations;
+      measurement.switch_to(Component::kRest);
       ++stats_.bound_flips;
       continue;
     }
@@ -670,17 +787,21 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
     const double a_col = alpha_col_[r];
     const bool p_to_lower = dir * a_col > 0.0;
 
+    measurement.switch_to(Component::kBtran);
     rho_.assign(static_cast<std::size_t>(m_), 0.0);
     rho_[r] = 1.0;
     factor_.btran(rho_);
+    measurement.switch_to(Component::kPivotRow);
     compute_pivot_row();
+    measurement.switch_to(Component::kRest);
     const double a_row = alpha_row_[q];
     if (std::fabs(a_col - a_row) > kPivotConsistencyTol * (1.0 + std::fabs(a_col)) && !fresh) {
       ++stats_.rebuilds_on_mismatch;
-      if (!refresh()) return SimplexStatus::kNumericalError;
+      if (!refresh(RebuildReason::kMismatch)) return SimplexStatus::kNumericalError;
       continue;
     }
 
+    measurement.switch_to(Component::kDualUpdate);
     const double theta_d = d_[q] / a_row;
     const double w_q = devex_weight_[q];
     for (const Index j : row_nz_) {
@@ -694,9 +815,11 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
     d_[p] = -theta_d;
     devex_weight_[p] = std::max(w_q / (a_row * a_row), 1.0);
 
+    measurement.switch_to(Component::kPrimalUpdate);
     for (Index k = 0; k < m_; ++k) x_[basic_[k]] -= step * dir * alpha_col_[k];
     x_[q] += step * dir;
     x_[p] = p_to_lower ? lower_[p] : upper_[p];
+    measurement.switch_to(Component::kRest);
 
     basic_[r] = q;
     position_[q] = r;
@@ -706,9 +829,10 @@ SimplexStatus Simplex::primal_loop(LoopResult& result) {
     dse_weight_[r] = 1.0;
     ++iterations_;
     ++stats_.primal_iterations;
-    if (factor_.update(r, spike_)) {
+    if (profile_) ++stats_.primal_cleanup_iterations;
+    if (update_factor(r)) {
       fresh = false;
-    } else if (!refresh()) {
+    } else if (!refresh(RebuildReason::kUnsafeUpdate)) {
       return SimplexStatus::kNumericalError;
     }
   }
@@ -762,7 +886,9 @@ SimplexStatus Simplex::dual_phase1() {
     }
   }
   place_nonbasic_dual_feasible();
+  dual_phase1_ = true;
   SimplexStatus status = dual_loop();
+  dual_phase1_ = false;
   lower_ = lp_.lower;
   upper_ = lp_.upper;
   cost_ = lp_.cost;
@@ -808,7 +934,9 @@ SimplexStatus Simplex::solve_dual_infeasible() {
   place_nonbasic_dual_feasible();
   compute_primal();
   perturb_costs(kFeasibilityCostBase);
+  dual_phase1_ = true;
   SimplexStatus status = dual_loop();
+  dual_phase1_ = false;
   log_.log(2, "simplex: feasibility search %s after %lld iterations", to_string(status),
            iterations_);
   if (status != SimplexStatus::kOptimal) return status;
@@ -832,6 +960,147 @@ void Simplex::reset() {
   std::fill(devex_weight_.begin(), devex_weight_.end(), 1.0);
 }
 
+bool Simplex::update_factor(Index position) {
+  const ProfileTimer measurement(time_iteration_, stats_, Component::kFactorUpdate);
+  return factor_.update(position, spike_);
+}
+
+bool Simplex::sample_iteration() {
+  if (!profile_) return false;
+  const bool sample = stats_.timing_attempts++ % stats_.timing_sample_interval == 0;
+  if (sample) ++stats_.timing_samples;
+  return sample;
+}
+
+void Simplex::begin_profile(bool warm_start) {
+  profile_ = options_.collect_stats || log_.enabled(2);
+  warm_start_ = warm_start;
+  warm_start_setup_ = warm_start;
+  dual_phase1_ = false;
+  // Keep the original lifetime work counters, while starting a fresh per-solve profile.
+  SimplexStats fresh;
+  fresh.dual_iterations = stats_.dual_iterations;
+  fresh.primal_iterations = stats_.primal_iterations;
+  fresh.bound_flips = stats_.bound_flips;
+  fresh.cost_shifts = stats_.cost_shifts;
+  fresh.refactorizations = stats_.refactorizations;
+  fresh.rebuilds_on_mismatch = stats_.rebuilds_on_mismatch;
+  stats_ = fresh;
+  stats_.collected = profile_;
+  stats_.timing_sample_interval = std::max(1, options_.timing_sample_interval);
+  time_iteration_ = false;
+  factor_.reset_stats();
+  if (profile_) profile_start_ = std::chrono::steady_clock::now();
+}
+
+void Simplex::finish_profile() {
+  if (!profile_) return;
+  stats_.total_seconds = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - profile_start_).count();
+  stats_.factor = factor_.stats();
+  if (warm_start_) stats_.warm_start_iterations = iterations_;
+  stats_.sampled_seconds = stats_.seconds;
+  const auto rebuild_slot = static_cast<std::size_t>(Component::kRebuild);
+  const auto rest_slot = static_cast<std::size_t>(Component::kRest);
+  double sampled = stats_.seconds[rest_slot];
+  for (std::size_t k = 0; k < rebuild_slot; ++k) sampled += stats_.seconds[k];
+  double scale = stats_.timing_samples > 0
+      ? static_cast<double>(stats_.timing_attempts) / static_cast<double>(stats_.timing_samples)
+      : 1.0;
+  // Deterministic stride sampling can overestimate (e.g. a very short/irregular solve). Keep
+  // estimates within the unsampled wall-time budget, preserving component proportions.
+  if (sampled > 0.0) {
+    scale = std::min(scale, std::max(0.0, stats_.total_seconds - stats_.seconds[rebuild_slot]) /
+                                sampled);
+  }
+  for (std::size_t k = 0; k < rebuild_slot; ++k) stats_.seconds[k] *= scale;
+  stats_.seconds[rest_slot] = 0.0;
+  double measured = 0.0;
+  for (double seconds : stats_.seconds) measured += seconds;
+  stats_.seconds[static_cast<std::size_t>(Component::kRest)] =
+      std::max(0.0, stats_.total_seconds - measured);
+  if (!log_.enabled(2)) return;
+
+  log_.log(2, "simplex profile begin (m=%d n=%d iterations=%lld)", m_, n_, iterations_);
+  log_.log(2, "  timing: every %d iteration attempts; sampled=%lld/%lld scale=%.6f; "
+              "component estimates, rebuild unsampled, counters/densities exact",
+           stats_.timing_sample_interval, stats_.timing_samples, stats_.timing_attempts, scale);
+  log_.log(2, "  component                    seconds     share     ms/iter");
+  const auto time_row = [&](const char* name, double seconds) {
+    log_.log(2, "  %-27s %10.6f %8.2f%% %11.6f", name, seconds,
+             stats_.total_seconds > 0.0 ? 100.0 * seconds / stats_.total_seconds : 0.0,
+             iterations_ > 0 ? 1000.0 * seconds / static_cast<double>(iterations_) : 0.0);
+  };
+  constexpr const char* names[] = {
+      "CHUZR", "BTRAN", "pivot row", "ratio test", "entering-column FTRAN", "DSE FTRAN (tau)",
+      "bound-flip FTRAN", "primal update", "dual/reduced-cost update", "DSE weight update",
+      "Forrest-Tomlin update", "rebuild + recompute", "rest"};
+  for (std::size_t k = 0; k < stats_.seconds.size(); ++k) time_row(names[k], stats_.seconds[k]);
+  time_row("total", stats_.total_seconds);
+  log_.log(2, "  phases: dual2=%lld dual1/feasibility=%lld primal_cleanup=%lld",
+           stats_.dual_phase2_iterations, stats_.dual_phase1_iterations,
+           stats_.primal_cleanup_iterations);
+  log_.log(2, "  warm start: iterations=%lld (overlaps phases; repair not separable) "
+              "rank_repairs=%lld flips=%lld shifts=%lld",
+           stats_.warm_start_iterations, stats_.warm_start_rank_repairs,
+           stats_.warm_start_bound_flips, stats_.warm_start_cost_shifts);
+  log_.log(2, "  density/vector                 solves      nnz sum      nnz max    avg nnz/m");
+  const auto density_row = [&](const char* name, const MeasurementCount& count) {
+    const double density = count.count > 0 && m_ > 0
+        ? static_cast<double>(count.sum) / static_cast<double>(count.count) / m_ : 0.0;
+    log_.log(2, "  %-27s %10lld %12lld %12lld %12.6f", name, count.count, count.sum,
+             count.maximum, density);
+  };
+  density_row("rho (after BTRAN)", stats_.rho_nnz);
+  density_row("alpha_col (after FTRAN)", stats_.alpha_col_nnz);
+  density_row("tau (after FTRAN)", stats_.tau_nnz);
+  density_row("flip RHS (before FTRAN)", stats_.flip_rhs_nnz);
+  const auto count_row = [&](const char* name, const MeasurementCount& count) {
+    log_.log(2, "  %-27s count=%lld sum=%lld max=%lld avg=%.3f", name, count.count, count.sum,
+             count.maximum, count.count > 0
+                 ? static_cast<double>(count.sum) / static_cast<double>(count.count) : 0.0);
+  };
+  count_row("dual ratio candidates", stats_.ratio_candidates);
+  count_row("dual Harris groups", stats_.harris_groups);
+  constexpr const char* reasons[] = {
+      "initial", "phase", "interval", "fill_limit", "unsafe_update", "mismatch", "numerical",
+      "confirmation", "rank_repair"};
+  log_.log(2, "  factor rebuilds=%lld factorize_s=%.6f max_factorize_s=%.6f "
+              "max_rebuild_recompute_s=%.6f rank_repairs=%lld",
+           stats_.factor.rebuilds, stats_.factor.rebuild_seconds,
+           stats_.factor.max_rebuild_seconds, stats_.max_rebuild_seconds, stats_.rank_repairs);
+  log_.log(2, "  rebuild calls=%lld avg_rebuild_recompute_s=%.6f avg_factorize_s=%.6f",
+           stats_.rebuild_calls, stats_.rebuild_calls > 0
+               ? stats_.seconds[rebuild_slot] / static_cast<double>(stats_.rebuild_calls) : 0.0,
+           stats_.factor.rebuilds > 0
+               ? stats_.factor.rebuild_seconds / static_cast<double>(stats_.factor.rebuilds) : 0.0);
+  for (std::size_t k = 0; k < stats_.factor.reasons.size(); ++k) {
+    log_.log(2, "  rebuild reason %-12s %lld", reasons[k], stats_.factor.reasons[k]);
+  }
+  log_.log(2, "  factor nnz: stored L/R eta entries; U includes diagonal; pre-state includes retained updates");
+  count_row("L before rebuild", stats_.factor.old_l_nnz);
+  count_row("U before rebuild", stats_.factor.old_u_nnz);
+  count_row("R before rebuild", stats_.factor.old_r_nnz);
+  count_row("L after rebuild", stats_.factor.l_nnz);
+  count_row("U after rebuild", stats_.factor.u_nnz);
+  count_row("R after rebuild", stats_.factor.r_nnz);
+  log_.log(2, "simplex profile end");
+}
+
+SimplexStatus Simplex::solve() {
+  begin_profile(false);
+  const SimplexStatus result = solve_cold();
+  finish_profile();
+  return result;
+}
+
+SimplexStatus Simplex::solve(const std::vector<VarStatus>& start) {
+  begin_profile(true);
+  const SimplexStatus result = solve_warm(start);
+  finish_profile();
+  return result;
+}
+
 // Keeps a nonbasic status consistent with the bounds.
 VarStatus Simplex::normalized_status(Index j, VarStatus st) const {
   const bool has_lower = lower_[j] > -kInf;
@@ -848,10 +1117,10 @@ VarStatus Simplex::normalized_status(Index j, VarStatus st) const {
   return st;
 }
 
-SimplexStatus Simplex::solve(const std::vector<VarStatus>& start) {
+SimplexStatus Simplex::solve_warm(const std::vector<VarStatus>& start) {
   if (start.size() != static_cast<std::size_t>(nt_) ||
       std::count(start.begin(), start.end(), VarStatus::kBasic) != m_) {
-    return solve();
+    return solve_cold();
   }
   reset();
   // Same statuses as the factorized basis (a child solved right after its parent): keep the
@@ -867,6 +1136,7 @@ SimplexStatus Simplex::solve(const std::vector<VarStatus>& start) {
       compute_dual();
       correct_dual_infeasibilities();
       skip_rebuild_ = true;
+      warm_start_setup_ = false;
       return phase2();
     }
   }
@@ -883,13 +1153,16 @@ SimplexStatus Simplex::solve(const std::vector<VarStatus>& start) {
       set_value_from_status(j);
     }
   }
-  if (!rebuild()) return solve();
+  if (!rebuild(RebuildReason::kInitial)) return solve_cold();
   correct_dual_infeasibilities();
   skip_rebuild_ = true;
+  warm_start_setup_ = false;
   return phase2();
 }
 
-SimplexStatus Simplex::solve() {
+SimplexStatus Simplex::solve_cold() {
+  warm_start_ = false;
+  warm_start_setup_ = false;
   reset();
   factor_valid_ = false;
 
@@ -910,7 +1183,7 @@ SimplexStatus Simplex::solve() {
     }
     set_value_from_status(j);
   }
-  if (!rebuild()) return SimplexStatus::kNumericalError;
+  if (!rebuild(RebuildReason::kInitial)) return SimplexStatus::kNumericalError;
 
   if (count_dual_infeasibilities_unboxed() > 0) {
     const SimplexStatus status = dual_phase1();

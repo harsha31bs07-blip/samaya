@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <random>
 #include <vector>
@@ -46,6 +47,33 @@ struct SimplexStats {
   long long cost_shifts = 0;
   long long refactorizations = 0;
   long long rebuilds_on_mismatch = 0;
+  // Detailed measurements are per solve; the legacy work counters above retain their lifetime
+  // semantics. A warm start has no separate repair phase: its iterations are an overlapping subset.
+  enum class Component : std::uint8_t {
+    kChuzr, kBtran, kPivotRow, kRatioTest, kEnteringFtran, kDseFtran, kFlipFtran,
+    kPrimalUpdate, kDualUpdate, kDseUpdate, kFactorUpdate, kRebuild, kRest, kCount
+  };
+  bool collected = false;
+  long long dual_phase2_iterations = 0;
+  long long dual_phase1_iterations = 0;  // Includes the auxiliary feasibility search.
+  long long primal_cleanup_iterations = 0;
+  long long warm_start_iterations = 0;
+  long long warm_start_rank_repairs = 0;
+  long long warm_start_bound_flips = 0;
+  long long warm_start_cost_shifts = 0;
+  long long rank_repairs = 0;
+  long long rebuild_calls = 0;  // A call can contain several factorization attempts/rank repairs.
+  MeasurementCount rho_nnz, alpha_col_nnz, tau_nnz, flip_rhs_nnz;
+  MeasurementCount ratio_candidates, harris_groups;  // Dual ratio-test calls, including retries.
+  BasisFactor::Stats factor;
+  std::array<double, static_cast<std::size_t>(Component::kCount)> seconds{};
+  // Raw sampled component seconds; seconds above contains the estimates at solve completion.
+  std::array<double, static_cast<std::size_t>(Component::kCount)> sampled_seconds{};
+  long long timing_attempts = 0;
+  long long timing_samples = 0;
+  int timing_sample_interval = 1;
+  double total_seconds = 0.0;
+  double max_rebuild_seconds = 0.0;
 };
 
 struct SimplexOptions {
@@ -57,6 +85,8 @@ struct SimplexOptions {
   bool perturb = true;
   int refactor_interval = 100;
   std::uint64_t seed = 1;
+  bool collect_stats = false;  // Detailed counters/timing; also enabled automatically at log level 2.
+  int timing_sample_interval = 32;  // 1: time every iteration; counters/densities are always exact.
 };
 
 // Bounded dual simplex with dual steepest-edge pricing, a Harris two-pass ratio test, cost
@@ -107,7 +137,13 @@ class Simplex {
   enum class LoopResult : std::uint8_t { kDone, kLostFeasibility };
 
   void reset();
-  bool rebuild();
+  void begin_profile(bool warm_start);
+  void finish_profile();
+  SimplexStatus solve_cold();
+  SimplexStatus solve_warm(const std::vector<VarStatus>& start);
+  bool rebuild(BasisFactor::RebuildReason reason = BasisFactor::RebuildReason::kPhase);
+  bool update_factor(Index position);
+  bool sample_iteration();
   VarStatus normalized_status(Index j, VarStatus st) const;
   void compute_primal();
   void compute_dual();
@@ -176,6 +212,12 @@ class Simplex {
 
   long long iterations_ = 0;
   SimplexStats stats_;
+  bool profile_ = false;
+  bool time_iteration_ = false;
+  bool warm_start_ = false;
+  bool warm_start_setup_ = false;
+  bool dual_phase1_ = false;
+  std::chrono::steady_clock::time_point profile_start_{};
   std::mt19937_64 rng_;
 };
 

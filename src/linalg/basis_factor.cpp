@@ -99,8 +99,32 @@ void BasisFactor::erase_position(std::vector<Entry>& list, Index position) {
   assert(false && "entry not found");
 }
 
-Index BasisFactor::factorize(std::span<const Index> basic) {
+BasisFactor::RebuildMeasurement::RebuildMeasurement(BasisFactor& f, RebuildReason reason)
+    : factor(f) {
+  if (!factor.options_.collect_stats) return;
+  start = std::chrono::steady_clock::now();
+  ++factor.stats_.rebuilds;
+  ++factor.stats_.reasons[static_cast<std::size_t>(reason)];
+  factor.stats_.old_l_nnz.add(static_cast<long long>(factor.l_index_.size()));
+  factor.stats_.old_u_nnz.add(factor.u_nnz_ + static_cast<long long>(
+      std::count_if(factor.diag_.begin(), factor.diag_.end(), [](double v) { return v != 0.0; })));
+  factor.stats_.old_r_nnz.add(static_cast<long long>(factor.r_index_.size()));
+}
+
+BasisFactor::RebuildMeasurement::~RebuildMeasurement() {
+  if (!factor.options_.collect_stats) return;
+  const double seconds = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - start).count();
+  factor.stats_.rebuild_seconds += seconds;
+  factor.stats_.max_rebuild_seconds = std::max(factor.stats_.max_rebuild_seconds, seconds);
+  factor.stats_.l_nnz.add(static_cast<long long>(factor.l_index_.size()));
+  factor.stats_.u_nnz.add(factor.u_nnz_ + static_cast<long long>(factor.order_.size()));
+  factor.stats_.r_nnz.add(static_cast<long long>(factor.r_index_.size()));
+}
+
+Index BasisFactor::factorize(std::span<const Index> basic, RebuildReason reason) {
   assert(basic.size() == static_cast<std::size_t>(m_));
+  const RebuildMeasurement measurement(*this, reason);
   clear();
   const Index m = m_;
   if (m == 0) {
@@ -311,7 +335,13 @@ bool BasisFactor::should_refactor() const {
   return num_updates_ >= options_.max_updates || factor_nnz() > 3 * initial_nnz_ + m_;
 }
 
-void BasisFactor::ftran(std::vector<double>& x, std::vector<double>* spike) const {
+BasisFactor::RebuildReason BasisFactor::refactor_reason() const {
+  // Match the short-circuit priority of should_refactor() when both safeguards fire.
+  return num_updates_ >= options_.max_updates ? RebuildReason::kInterval : RebuildReason::kFillLimit;
+}
+
+void BasisFactor::ftran(std::vector<double>& x, std::vector<double>* spike,
+                        MeasurementCount* nonzeros) const {
   assert(valid_);
   for (std::size_t e = 0; e < l_pivot_row_.size(); ++e) {
     const double xp = x[l_pivot_row_[e]];
@@ -326,6 +356,7 @@ void BasisFactor::ftran(std::vector<double>& x, std::vector<double>* spike) cons
   if (spike != nullptr) *spike = x;
 
   std::vector<double>& y = work_;
+  long long nnz = 0;
   for (std::size_t slot = order_.size(); slot-- > 0;) {
     const Index r = order_[slot];
     if (r < 0) continue;
@@ -336,9 +367,11 @@ void BasisFactor::ftran(std::vector<double>& x, std::vector<double>* spike) cons
     }
     const double yr = xp / diag_[r];
     y[r] = yr;
+    if (nonzeros != nullptr && yr != 0.0) ++nnz;
     for (const Entry& e : ucol_[r]) x[prow_[e.first]] -= e.second * yr;
   }
   x.swap(y);
+  if (nonzeros != nullptr) nonzeros->add(nnz);
 }
 
 void BasisFactor::btran(std::vector<double>& c) const {

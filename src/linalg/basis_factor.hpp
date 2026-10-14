@@ -1,5 +1,8 @@
 #pragma once
 
+#include <array>
+#include <chrono>
+#include <cstdint>
 #include <span>
 #include <utility>
 #include <vector>
@@ -7,6 +10,18 @@
 #include "samaya/sparse_matrix.hpp"
 
 namespace samaya {
+
+// Integer observations (including zero), used for solve densities and factor fill.
+struct MeasurementCount {
+  long long count = 0;
+  long long sum = 0;
+  long long maximum = 0;
+  void add(long long value) {
+    ++count;
+    sum += value;
+    if (value > maximum) maximum = value;
+  }
+};
 
 // Sparse LU factorization of a simplex basis with Forrest–Tomlin updates.
 //
@@ -23,12 +38,25 @@ namespace samaya {
 // permutation that changes as updates move pivots to the end of the pivot order.
 class BasisFactor {
  public:
+  enum class RebuildReason : std::uint8_t {
+    kInitial, kPhase, kInterval, kFillLimit, kUnsafeUpdate, kMismatch,
+    kNumerical, kConfirmation, kRankRepair, kCount
+  };
+  struct Stats {
+    long long rebuilds = 0;  // Factorization attempts, including rank-repair retries.
+    std::array<long long, static_cast<std::size_t>(RebuildReason::kCount)> reasons{};
+    MeasurementCount l_nnz, u_nnz, r_nnz;  // After factorization; U includes its diagonal.
+    MeasurementCount old_l_nnz, old_u_nnz, old_r_nnz;  // Immediately before clearing updates.
+    double rebuild_seconds = 0.0;
+    double max_rebuild_seconds = 0.0;
+  };
   struct Options {
     double pivot_threshold = 0.1;  // Relative threshold against the column max.
     double abs_pivot_tol = 1e-11;  // Smaller pivots count as zero (rank deficiency).
     double drop_tol = 1e-14;       // Fill-in below this magnitude is dropped.
     int search_limit = 4;          // Markowitz search stops after this many candidate lines.
     int max_updates = 100;         // Refactorization interval.
+    bool collect_stats = false;
   };
 
   explicit BasisFactor(const SparseMatrix& A) : BasisFactor(A, Options{}) {}
@@ -38,14 +66,16 @@ class BasisFactor {
   // usable and singular_positions() / unpivoted_rows() (equal length) say which basis columns
   // could not be pivoted and which rows were left; replacing basis position
   // singular_positions()[k] with the logical of unpivoted_rows()[k] gives a nonsingular basis.
-  Index factorize(std::span<const Index> basic);
+  Index factorize(std::span<const Index> basic, RebuildReason reason = RebuildReason::kInitial);
 
   const std::vector<Index>& singular_positions() const { return singular_positions_; }
   const std::vector<Index>& unpivoted_rows() const { return unpivoted_rows_; }
 
   // Solves B z = x. Input is indexed by row, output by basis position (in place). If spike is
   // non-null it receives the partially transformed vector R L x needed by update().
-  void ftran(std::vector<double>& x, std::vector<double>* spike = nullptr) const;
+  // Optional density observation is counted as output entries are written, with no extra scan.
+  void ftran(std::vector<double>& x, std::vector<double>* spike = nullptr,
+             MeasurementCount* nonzeros = nullptr) const;
 
   // Solves B^T z = c. Input is indexed by basis position, output by row (in place).
   void btran(std::vector<double>& c) const;
@@ -59,8 +89,18 @@ class BasisFactor {
   bool should_refactor() const;
   Index rows() const { return m_; }
   NnzIndex factor_nnz() const;
+  RebuildReason refactor_reason() const;
+  const Stats& stats() const { return stats_; }
+  void reset_stats() { stats_ = {}; }
 
  private:
+  // Records every return path, including a rank-deficient factorization.
+  struct RebuildMeasurement {
+    BasisFactor& factor;
+    std::chrono::steady_clock::time_point start{};
+    RebuildMeasurement(BasisFactor& factor, RebuildReason reason);
+    ~RebuildMeasurement();
+  };
   using Entry = std::pair<Index, double>;
 
   void clear();
@@ -68,6 +108,7 @@ class BasisFactor {
 
   const SparseMatrix& A_;
   Options options_;
+  Stats stats_;
   Index m_;
   Index n_;
 

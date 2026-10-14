@@ -1,7 +1,9 @@
 // Differential tests: the sparse dual simplex against the dense reference simplex on randomly
 // generated LPs.
 
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <random>
 #include <string>
@@ -338,4 +340,143 @@ TEST(lp_random_large_models_verify_first_time) {
     proven += report.ok ? 1 : 0;
   }
   CHECK_EQ(proven, 12);
+}
+
+TEST(lp_random_profile_preserves_objective_bits_and_iterations) {
+  std::mt19937 rng(20261014);
+  const samaya::Logger quiet(0);
+  long long profiled_iterations = 0;
+  const auto compare = [&](const LpResult& plain, const LpResult& profiled) {
+    CHECK(plain.status == profiled.status);
+    CHECK_EQ(plain.iterations, profiled.iterations);
+    CHECK_EQ(std::bit_cast<std::uint64_t>(plain.objective),
+             std::bit_cast<std::uint64_t>(profiled.objective));
+    CHECK(plain.basis == profiled.basis);
+    const auto same_bits = [](const std::vector<double>& a, const std::vector<double>& b) {
+      REQUIRE(a.size() == b.size());
+      for (std::size_t j = 0; j < a.size(); ++j) {
+        CHECK_EQ(std::bit_cast<std::uint64_t>(a[j]), std::bit_cast<std::uint64_t>(b[j]));
+      }
+    };
+    same_bits(plain.col_value, profiled.col_value);
+    same_bits(plain.row_dual, profiled.row_dual);
+    same_bits(plain.col_dual, profiled.col_dual);
+    same_bits(plain.dual_ray, profiled.dual_ray);
+    same_bits(plain.primal_ray, profiled.primal_ray);
+    profiled_iterations += profiled.iterations;
+    CHECK(!plain.stats.collected);
+    CHECK(profiled.stats.collected);
+    CHECK(profiled.stats.total_seconds > 0.0);
+    CHECK_EQ(profiled.stats.factor.rebuilds, profiled.stats.refactorizations);
+    CHECK_EQ(profiled.stats.dual_phase1_iterations + profiled.stats.dual_phase2_iterations +
+                 profiled.stats.primal_cleanup_iterations, profiled.iterations);
+    CHECK_EQ(profiled.stats.ratio_candidates.count, profiled.stats.harris_groups.count);
+    double seconds = 0.0;
+    for (double component : profiled.stats.seconds) {
+      CHECK(component >= 0.0);
+      seconds += component;
+    }
+    CHECK_NEAR(seconds, profiled.stats.total_seconds, 1e-10);
+  };
+  for (LpFamily family : {LpFamily::kFeasible, LpFamily::kRandom, LpFamily::kDegenerate,
+                          LpFamily::kLoose, LpFamily::kBoxed}) {
+    for (int k = 0; k < 16; ++k) {
+      const Model model = samaya::test::random_lp(family, 30, 40, rng);
+      LpSolveOptions options;
+      options.scale = false;  // Inspect a single Simplex::solve profile, without unscaled polishing.
+      options.simplex.refactor_interval = 2;
+      options.simplex.perturb = k % 2 == 0;
+      options.simplex.timing_sample_interval = k % 2 == 0 ? 1 : 32;
+      const LpResult plain = samaya::solve_lp(model, options, quiet);
+      options.simplex.collect_stats = true;
+      const LpResult profiled = samaya::solve_lp(model, options, quiet);
+      compare(plain, profiled);
+      CHECK_EQ(profiled.stats.timing_samples,
+               (profiled.stats.timing_attempts + profiled.stats.timing_sample_interval - 1) /
+                   profiled.stats.timing_sample_interval);
+      if (plain.status != SimplexStatus::kOptimal) continue;
+      options.start = plain.basis;
+      options.simplex.collect_stats = false;
+      const LpResult warm_plain = samaya::solve_lp(model, options, quiet);
+      options.simplex.collect_stats = true;
+      const LpResult warm_profiled = samaya::solve_lp(model, options, quiet);
+      compare(warm_plain, warm_profiled);
+      CHECK_EQ(warm_profiled.stats.warm_start_iterations, warm_profiled.iterations);
+    }
+  }
+  CHECK(profiled_iterations > 100);
+}
+
+TEST(lp_profile_counts_rank_repairs_and_resets_on_reused_warm_start) {
+  samaya::LpProblem lp;
+  lp.m = lp.n = 2;
+  lp.A = samaya::SparseMatrix::from_triplets(2, 2,
+      {{0, 0, 1.0}, {1, 0, 1.0}, {0, 1, 1.0}, {1, 1, 1.0}});
+  lp.At = lp.A.transpose();
+  lp.cost = {1.0, 2.0, 0.0, 0.0};
+  lp.lower = {0.0, 0.0, 1.0, 1.0};
+  lp.upper = {10.0, 10.0, samaya::kInf, samaya::kInf};
+  samaya::SimplexOptions options;
+  options.collect_stats = true;
+  const samaya::Logger quiet(0);
+  samaya::Simplex simplex(lp, options, quiet);
+  const std::vector<samaya::VarStatus> singular = {
+      samaya::VarStatus::kBasic, samaya::VarStatus::kBasic,
+      samaya::VarStatus::kAtLower, samaya::VarStatus::kAtLower};
+  REQUIRE(simplex.solve(singular) == SimplexStatus::kOptimal);
+  CHECK_EQ(simplex.stats().warm_start_rank_repairs, 1);
+  CHECK_EQ(simplex.stats().rank_repairs, 1);
+  CHECK_EQ(simplex.stats().factor.reasons[static_cast<std::size_t>(
+      samaya::BasisFactor::RebuildReason::kRankRepair)], 1);
+  const auto start = simplex.status();
+  REQUIRE(simplex.solve(start) == SimplexStatus::kOptimal);
+  CHECK_EQ(simplex.iterations(), 0);
+  CHECK_EQ(simplex.stats().warm_start_rank_repairs, 0);
+  CHECK_EQ(simplex.stats().factor.rebuilds, 0);
+  CHECK_EQ(simplex.stats().rho_nnz.count, 0);
+}
+
+TEST(lp_profile_counts_warm_start_flips_and_cost_shifts) {
+  samaya::LpProblem lp;
+  lp.m = 1;
+  lp.n = 2;
+  lp.A = samaya::SparseMatrix::from_triplets(1, 2, {{0, 0, 1.0}, {0, 1, 1.0}});
+  lp.At = lp.A.transpose();
+  lp.cost = {-1.0, -2.0, 0.0};
+  lp.lower = {0.0, 0.0, -samaya::kInf};
+  lp.upper = {2.0, samaya::kInf, 1.0};
+  samaya::SimplexOptions options;
+  options.collect_stats = true;
+  const samaya::Logger quiet(0);
+  samaya::Simplex simplex(lp, options, quiet);
+  REQUIRE(simplex.solve({samaya::VarStatus::kAtLower, samaya::VarStatus::kAtLower,
+                         samaya::VarStatus::kBasic}) == SimplexStatus::kOptimal);
+  CHECK_EQ(simplex.stats().warm_start_bound_flips, 1);
+  CHECK_EQ(simplex.stats().warm_start_cost_shifts, 1);
+  CHECK_EQ(simplex.stats().warm_start_iterations, simplex.iterations());
+}
+
+TEST(lp_profile_ftran_density_counts_outputs_after_updates) {
+  const auto matrix = samaya::SparseMatrix::from_triplets(2, 1,
+      {{0, 0, 1.0}, {1, 0, 1.0}});
+  samaya::BasisFactor factor(matrix);
+  const std::vector<samaya::Index> logicals = {1, 2};
+  REQUIRE(factor.factorize(logicals) == 0);
+  samaya::MeasurementCount count;
+  std::vector<double> column = {1.0, 1.0};
+  std::vector<double> spike;
+  factor.ftran(column, &spike, &count);
+  CHECK_EQ(count.sum, 2);
+  REQUIRE(factor.update(0, spike));
+  // In the updated basis [a, -e_1], this RHS has solution (2, 0). The moved pivot
+  // leaves a tombstone in the factor order; it must not be counted a second time.
+  column = {2.0, 2.0};
+  factor.ftran(column, nullptr, &count);
+  CHECK_EQ(column[0], 2.0);
+  CHECK_EQ(column[1], 0.0);
+  column = {0.0, 0.0};
+  factor.ftran(column, nullptr, &count);
+  CHECK_EQ(count.count, 3);
+  CHECK_EQ(count.sum, 3);
+  CHECK_EQ(count.maximum, 2);
 }

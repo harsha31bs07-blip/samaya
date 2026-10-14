@@ -21,6 +21,30 @@ update nonzeros; ratio-test candidate and group counts; rank repairs at a warm s
 Then a 10-minute run of the crossover on the large LP and the Netlib set. **Every later step
 starts from that table.**
 
+Build the release CLI, then run `bash bench/simplex_profile.sh MODEL --lp-method dual`
+(add `--no-presolve` to measure the original matrix). `SAMAYA_BIN=/path/to/samaya` overrides
+the default `build/release/apps/cli/samaya`. For crossover use the usual barrier/PDLP arguments
+and `--crossover`. The driver extracts every `simplex profile begin` / `simplex profile end`
+block, including any unscaled cleanup. Level 1 is unchanged; C++ callers can collect without
+printing via `SimplexOptions::collect_stats`. Profiles are per `Simplex::solve`; the original
+work counters retain their lifetime semantics. Warm-start iterations overlap the phase counts:
+the current algorithm has no distinct repair iteration phase. Dual phase 1 includes the auxiliary
+feasibility search. Density counts use exact nonzero comparisons, include failed pivot attempts,
+and describe rho/alpha/tau after solving and the flip RHS before solving. Factor snapshots include
+stored L/R eta entries and U's diagonal, both before and after each factorization attempt (including
+rank-repair retries); a new factor's pre-snapshot is empty, while reuse retains the old updates.
+Ratio counts cover dual ratio-test attempts.
+The `rest` row includes setup, recomputation outside rebuilds, and measurement overhead; rebuild
+timing includes factorization and primal/dual recomputation. Confirm the overhead gate on the idle
+Linux Netlib run by comparing timing collection against the same binary without collection/logging,
+and against the uninstrumented release baseline.
+Local Release measurements exceeded the overhead gate when timing every iteration, so component
+timers default to every 32nd iteration attempt (including retries). Counters and densities remain
+exact, rebuild timers are unsampled, and the table labels the extrapolated component estimates.
+Their common scale is attempts/samples, capped to the wall-time budget excluding rebuilds; raw
+sampled seconds are also returned in `SimplexStats::sampled_seconds`. C++ callers can set
+`SimplexOptions::timing_sample_interval = 1` for a full trace, or a larger stride to lower overhead.
+
 ## 1. Indexed vectors through the iteration (2–4 days; est. 1.3–2.5x here, 1.0–1.3x Netlib)
 
 Today: CHUZR scans all m basics (`simplex.cpp:312`), the BTRAN right-hand side and the entering
