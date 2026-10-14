@@ -132,7 +132,53 @@ incrementally maintained list of primal-infeasible rows for CHUZR. Risk: a row t
 infeasible and is missed would end the search early: keep the full recomputation before
 accepting optimality, and the verifier.
 
-## 2. Adaptive refactorization (1–2 days; est. 1.0–2.5x)
+**1b done (2230a55): CHUZR over a list of primal-infeasible rows.** The large-LP crossover at
+2230a55, still with the 100-update interval, 600 s
+(`bench/results/step0/2230a55-crossover/`):
+- CHUZR fell from 5.27 to 3.26 ms per iteration, and the iteration from 35.4 to 33.2 ms.
+- The primal update rose from 1.54 to 1.85 ms, which is the cost of keeping the list.
+- The gain is small because the list averages 215,885 entries, 46% of the 467,376 rows: about
+  half the rows of this warm start are primal infeasible.
+- On the MIPLIB A/B against 0a149c8 (60 s, four processes at once), simplex iterations per second
+  had a geomean of 0.957. pk1 took the identical path 7% slower. The A/B also contains the
+  presolve commits and its noise is large, so 1b's own overhead on small LPs is measured
+  separately (`bench/results/step1b-overhead/`, sequential, 999caca against 2230a55).
+
+## 2. Adaptive refactorization (done: 45487d0)
+
+**Experiment (14 October 2026).** The large-LP crossover, 600 s, with the interval forced
+through a throwaway environment override (raw data: `bench/results/step0/refactor-interval/`):
+
+| Interval | Iterations | ms/iteration | Rebuild share | DSE FTRAN ms | R entries before a rebuild |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 16,384 | 35.4 | 37% | 3.44 | 8k |
+| 300 | 20,192 | 28.7 | 17% | 4.08 | 26k |
+| 1000 | 21,856 | 26.4 | 5% | 4.43 | 122k |
+
+No numerical, mismatch or unsafe-update rebuild at any interval. The solves get slowly dearer
+as the Forrest-Tomlin etas grow, so the gain flattens. 1000 gives 1.34x iterations per hour.
+
+**Policy (45487d0).** An amortized rule, deterministic (entries, not time):
+- After each update, add 3 solves × (factor entries now − entries after the last
+  factorization).
+- Refactorize when that sum reaches `rebuild_cost` × the entries after factorization.
+- `rebuild_cost` = 200 is calibrated from the step-0 profiles. The ratio of factorization
+  cost per entry to solve cost per entry is about 70 on most Netlib models and 150–340 on
+  pilot, pilot87, fit2p and the large LP. The optimal interval goes with its square root.
+- `refactor_interval` is now a cap of 2000.
+
+**Measured (`bench/results/step2/45487d0/`, against 2230a55, alone on the machine).**
+- Large-LP crossover, 600 s: 25.3 ms per iteration, down from 33.2. That is 22,976 iterations
+  instead of 17,408, about the same as the best fixed interval (26.4 ms at 1000).
+- 21 rebuilds: 16 for update work, 4 at the 2000 cap, and the initial one. The rebuild share
+  fell from 40% to 5.4%.
+- Netlib, dual simplex, best of 2 rounds: all 93 models optimal with both builds. The time
+  ratio geomean is 0.995, so the change is neutral on Netlib. 33 models take a different path,
+  because rebuilding at a different point changes the rounding.
+- Largest Netlib changes: pilot 2.21 → 1.74 s (0.79), nesm 0.85, greenbea 0.86; dfl001 1.05
+  and greenbeb 1.04 are the slowest of the models above 1 s.
+
+### Original plan
 
 `refactor_interval = 100` (`simplex.hpp:58`) means about 869 rebuilds over that run; at 0.1, 1
 or 3 s per rebuild of a 467k basis that is 1, 10 or 30 ms per iteration, so step 0 decides
@@ -170,6 +216,16 @@ m without checking independence (`crossover.cpp:68`); rank repairs use logicals 
 which on equality rows start infeasible; only statuses survive, not PDLP's small residual. A
 rank-aware (triangular) basis construction and a quality check first; Megiddo push phases
 later. How many of the 86,912 iterations were repair is unknown until step 0.
+
+**Part 1 (1757a8d): repair inside `crossover_basis`.** The 110,681 dependent positions are now
+replaced in 2 factorizations and 0.78 s, by logicals of the unpivoted rows. Each leaving variable
+goes to the bound nearest its PDLP value. The warm start then needs no rank repair.
+
+What it did not change: the dual simplex still starts with about half the rows primal
+infeasible, and runs 17,408 iterations in 600 s without finishing. The final basis holds
+110,681 equality-row logicals, the same number as the repairs. Those logicals are fixed, so a
+basic one is infeasible whenever its row's activity is off the right-hand side. A basis that is independent from
+the start (the triangular crash of part 2) is the next lever.
 
 ## Order
 
