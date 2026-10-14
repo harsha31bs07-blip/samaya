@@ -1758,7 +1758,10 @@ Model cancellation_model() {
 
 TEST(presolve_substitution_rejects_cancelled_coefficient) {
   const Model model = cancellation_model();
-  REQUIRE(0.1 + 0.2 - 0.9 * 1.0 / 3.0 != 0.0);  // The noise this test is about.
+  // The noise this test is about, from the stored coefficients (column-wise: 3, 0.9 | 1, 0.1 + 0.2)
+  // rather than literals, which MSVC flags as a constant condition (C4127).
+  const auto& a = model.A.values();
+  REQUIRE(a[3] - a[1] * a[2] / a[0] != 0.0);
   Presolve p(model);
   REQUIRE(p.run() == PresolveStatus::kReduced);
   CHECK_EQ(p.stats().substitution_continuous_cols, 0);

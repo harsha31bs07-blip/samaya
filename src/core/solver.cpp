@@ -41,6 +41,11 @@ void log_crossover_stats(const CrossoverStats& stats, const Logger& log) {
           stats.basic_structurals, stats.basic_equality_logicals, stats.basic_other_logicals,
           stats.basic_fixed_structurals, stats.repairs, stats.factorizations,
           stats.rank_deficiency, stats.factorization_seconds);
+  log.log(2, "Crossover snap: superbasics %d (1e-9) %d (1e-6) %d (1e-3); infeasible basics %d "
+             "before, %d after; max basic change %.3e, max violation after %.3e",
+          stats.superbasic_e9, stats.superbasic_e6, stats.superbasic_e3,
+          stats.infeasible_basics_before, stats.infeasible_basics_after, stats.max_basic_change,
+          stats.max_violation_after);
 }
 
 Status to_status(SimplexStatus s) {

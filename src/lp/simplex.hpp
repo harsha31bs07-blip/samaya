@@ -65,7 +65,8 @@ struct SimplexStats {
   long long rebuild_calls = 0;  // A call can contain several factorization attempts/rank repairs.
   MeasurementCount rho_nnz, alpha_col_nnz, tau_nnz, flip_rhs_nnz;
   MeasurementCount ratio_candidates, harris_groups;  // Dual ratio-test calls, including retries.
-  MeasurementCount chuzr_list;  // Length of the infeasibility list at each CHUZR.
+  MeasurementCount chuzr_list;  // Infeasibility list length at each CHUZR, stale entries included.
+  MeasurementCount primal_infeasible_rows;  // Infeasible basic rows at each CHUZR, either mode.
   long long chuzr_scans = 0;    // CHUZRs that scanned all m rows instead (dense updates).
   BasisFactor::Stats factor;
   std::array<double, static_cast<std::size_t>(Component::kCount)> seconds{};

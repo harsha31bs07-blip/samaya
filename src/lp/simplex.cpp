@@ -472,13 +472,18 @@ Index Simplex::choose_leaving_row() {
     return infeasibility * infeasibility / w;
   };
   if (!track_infeasible_) {
-    if (profile_) ++stats_.chuzr_scans;
+    long long infeasible = 0;
     for (Index k = 0; k < m_; ++k) {
       const double score = score_of(k);
+      infeasible += score >= 0.0;
       if (score > best_score) {
         best_score = score;
         best = k;
       }
+    }
+    if (profile_) {
+      ++stats_.chuzr_scans;
+      stats_.primal_infeasible_rows.add(infeasible);
     }
     return best;
   }
@@ -500,6 +505,8 @@ Index Simplex::choose_leaving_row() {
     }
     ++t;
   }
+  // After the stale entries are dropped the list holds exactly the infeasible positions.
+  if (profile_) stats_.primal_infeasible_rows.add(static_cast<long long>(infeasible_.size()));
   return best;
 }
 
@@ -1164,6 +1171,7 @@ void Simplex::finish_profile() {
   count_row("dual ratio candidates", stats_.ratio_candidates);
   count_row("dual Harris groups", stats_.harris_groups);
   count_row("CHUZR infeasibility list", stats_.chuzr_list);
+  count_row("primal-infeasible rows", stats_.primal_infeasible_rows);
   log_.log(2, "  CHUZR full scans (dense updates) %lld", stats_.chuzr_scans);
   constexpr const char* reasons[] = {
       "initial", "phase", "interval", "fill_limit", "unsafe_update", "mismatch", "numerical",

@@ -41,6 +41,33 @@ std::vector<Index> basic_variables(const std::vector<VarStatus>& status) {
 
 }  // namespace
 
+TEST(crossover_snap_diagnostics_measure_the_moved_basics) {
+  // x0 + x1 = 10 with x0 in [1, 10], x1 in [0, 10], at the point (3, 7). Both score 1; x0 has more
+  // slack and is basic. x1 snaps to its nearer bound 10 (d = 3), which moves x0 to 0, below 1:
+  // relative violation (1 - 0) / (1 + 1).
+  Model model;
+  model.A = samaya::SparseMatrix::from_triplets(1, 2, {{0, 0, 1.0}, {0, 1, 1.0}});
+  model.obj = {0.0, 0.0};
+  model.col_lower = {1.0, 0.0};
+  model.col_upper = {10.0, 10.0};
+  model.col_type.assign(2, samaya::VarType::kContinuous);
+  model.row_lower = {10.0};
+  model.row_upper = {10.0};
+  const std::vector<double> x = {3.0, 7.0};
+  const std::vector<double> y = {0.0};
+  samaya::CrossoverStats stats;
+  const std::vector<VarStatus> status = samaya::crossover_basis(model, x, y, &stats);
+  REQUIRE(status[0] == VarStatus::kBasic);
+  REQUIRE(status[1] == VarStatus::kAtUpper);
+  CHECK_EQ(stats.superbasic_e9, 1);
+  CHECK_EQ(stats.superbasic_e6, 1);
+  CHECK_EQ(stats.superbasic_e3, 1);
+  CHECK_EQ(stats.infeasible_basics_before, 0);
+  CHECK_EQ(stats.infeasible_basics_after, 1);
+  CHECK_NEAR(stats.max_basic_change, 3.0, 1e-12);
+  CHECK_NEAR(stats.max_violation_after, 0.5, 1e-12);
+}
+
 TEST(crossover_repairs_dependent_columns_at_the_point_nearest_bound) {
   // Match the simplex's default primal tolerance when checking the equality objective.
   constexpr double kObjectiveTolerance = 1e-7;

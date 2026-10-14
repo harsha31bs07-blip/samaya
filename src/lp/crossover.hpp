@@ -17,6 +17,16 @@ struct CrossoverStats {
   int factorizations = 0;
   Index rank_deficiency = 0;  // From the last factorization; zero on success.
   double factorization_seconds = 0.0;
+  // What snapping the nonbasic variables to their bounds does to the point (measured on the
+  // final basis when it factorized). Superbasics: nonbasics whose point value is off the chosen
+  // bound by more than 1e-9, 1e-6 and 1e-3 relative.
+  Index superbasic_e9 = 0;
+  Index superbasic_e6 = 0;
+  Index superbasic_e3 = 0;
+  Index infeasible_basics_before = 0;  // Basic values of the point outside their bounds.
+  Index infeasible_basics_after = 0;   // Basic values after the nonbasics are snapped.
+  double max_basic_change = 0.0;       // Largest change of a basic value from the snap.
+  double max_violation_after = 0.0;    // Largest bound violation of a basic value after it.
 };
 
 // Crossover: a simplex basis guessed from a primal-dual point of an LP, e.g. the answer of the

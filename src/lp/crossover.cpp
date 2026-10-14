@@ -31,6 +31,61 @@ VarStatus nearest_bound(double value, double lower, double upper) {
   return VarStatus::kAtZero;
 }
 
+double bound_value(VarStatus status, double lower, double upper) {
+  if (status == VarStatus::kAtLower) return lower;
+  if (status == VarStatus::kAtUpper) return upper;
+  return 0.0;
+}
+
+// Diagnostics only: the snap moves each nonbasic by d_j = bound - value; the basics then change by
+// -B^-1 [A -I]_N d_N (the point satisfies [A -I] z = 0 by construction of the logicals).
+void measure_snap(const Model& model, const std::vector<double>& value,
+                  const std::vector<double>& lower, const std::vector<double>& upper,
+                  const std::vector<VarStatus>& status, const std::vector<Index>& basic,
+                  const BasisFactor& factor, CrossoverStats& out) {
+  // Same feasibility test as the simplex's primal tolerance, relative to the bound here since the
+  // model is unscaled.
+  constexpr double kFeasibilityTol = 1e-7;
+  const Index m = model.num_rows();
+  const Index n = model.num_cols();
+  const Index nt = n + m;
+  std::vector<double> change(static_cast<std::size_t>(m), 0.0);  // [A -I]_N d_N.
+  for (Index j = 0; j < nt; ++j) {
+    if (status[j] == VarStatus::kBasic) continue;
+    const double d = bound_value(status[j], lower[j], upper[j]) - value[j];
+    const double distance = std::fabs(d) / (1.0 + std::fabs(value[j]));
+    out.superbasic_e9 += distance > 1e-9;
+    out.superbasic_e6 += distance > 1e-6;
+    out.superbasic_e3 += distance > 1e-3;
+    if (d == 0.0) continue;
+    if (j < n) {
+      for (NnzIndex p = model.A.col_start()[j]; p < model.A.col_start()[j + 1]; ++p) {
+        change[model.A.row_index()[p]] += model.A.values()[p] * d;
+      }
+    } else {
+      change[j - n] -= d;
+    }
+  }
+  factor.ftran(change);
+  const auto violation = [&](Index j, double v) {
+    const double below = lower[j] - v;
+    const double above = v - upper[j];
+    const double worst = std::max(below / (1.0 + std::fabs(lower[j])),
+                                  above / (1.0 + std::fabs(upper[j])));
+    return std::max(0.0, worst);
+  };
+  for (Index k = 0; k < m; ++k) {
+    const Index j = basic[k];
+    const double before = value[j];
+    const double after = value[j] - change[k];
+    out.max_basic_change = std::max(out.max_basic_change, std::fabs(change[k]));
+    out.infeasible_basics_before += violation(j, before) > kFeasibilityTol;
+    const double v = violation(j, after);
+    out.infeasible_basics_after += v > kFeasibilityTol;
+    out.max_violation_after = std::max(out.max_violation_after, v);
+  }
+}
+
 }  // namespace
 
 std::vector<VarStatus> crossover_basis(const Model& model, std::span<const double> x,
@@ -137,6 +192,9 @@ std::vector<VarStatus> crossover_basis(const Model& model, std::span<const doubl
       }
     }
     measurements.factorization_seconds = factor.stats().rebuild_seconds;
+    if (measurements.rank_deficiency == 0) {
+      measure_snap(model, value, lower, upper, status, basic, factor, measurements);
+    }
     *stats = measurements;
   }
   return status;
