@@ -335,6 +335,79 @@ are paired. Raw data: `bench/results/step0/c2-counters/`.
   b1c1s1 1.42, neos-2657525-crna 1.41, neos859080 1.33, fhnw-binpack4-4 1.24. C3 is
   measured against these first.
 - Still to do for C2: the MIPLIB A/B at 60 s, and its LP dual postsolve.
+
+#### Measured after C3 (14 October 2026, e4d04bb)
+
+Same script, same 62 instances, all paired. Raw data: `bench/results/step0/c3/`.
+
+- Columns 97,861 → **97,326** (HiGHS 91,995). Geomean samaya/HiGHS 1.063 → **1.059**.
+- C3 substituted 542 columns, all continuous, and **535 of them on milo-v12-6-r2-40-1**
+  (2,473 → 1,938 columns; HiGHS 1,698). It changed no other instance's column count.
+- Rejects (counted per candidate per pass, so they overlap across passes): not implied free
+  155,087; column longer than 10 rows 34,993; integer data 6,124; tolerance only 5,628; fill
+  672; pivot 1,013; row longer than 10 entries 3,332; residual and nonfinite 0.
+- **Why so little:** the first guess was that our test proves x's bounds from the substituted
+  equation alone, whereas HiGHS takes each bound from whichever row gives it. C3b tested that
+  and gained little. The cause was the proof's strictness (next section).
+- **Testing C3 found a bug shared with C2** (fixed in e4d04bb). An updated coefficient that
+  cancels to rounding noise passed the residual check when it was the only coefficient left in
+  its row. The row then became a wrong bound, and presolve declared a feasible random LP
+  infeasible (GCC; MSVC rounded differently). Both rules now also reject a nonzero result below
+  1e-9 of its operands.
+
+#### Measured after C3b and exact proofs (14 October 2026, c0b1aa6)
+
+- **C3b alone did almost nothing.** Bounds from another row allowed 4 more substitutions
+  (geomean unchanged at 1.059).
+- **The proof's strictness was the obstacle.** It always demanded a margin: an outward
+  allowance plus a strict `nextafter` comparison. So an implied bound exactly equal to the
+  column bound was never proved, although it is the common case with integral data (x ≤ 1
+  from x + y ≤ 1, y ≥ 0).
+- An unsound experiment, with no allowance and a non-strict comparison, bounded the gain.
+  The sound version reaches the same sizes: it tracks whether the activity sum, the
+  subtraction and the division were exact (FMA residuals and two-sum errors, as C2 does), and
+  only then accepts equality.
+- Columns 97,326 → **96,872**; geomean samaya/HiGHS 1.059 → **1.051**. No status changes.
+- C1 fires 185 times (was 1). C3 fires 1,139 times (was 542; 231 integer), 263 of them with a
+  bound from another row.
+- Per instance (columns, HiGHS in brackets): neos-2657525-crna 436 → 332 (309), csched008
+  1,524 → 1,505 (1,503), csched007 1,754 → 1,733 (1,683), neos-4954672-berkel 1,053 → 981
+  (885), cost266-UUE 4,152 → 4,136 (4,136), tr12-30 1,068 → 1,060 (1,052).
+- **Still far:** app1-1 2,381 (1,059) and b1c1s1 3,760 (2,718).
+- **What HiGHS uses there** (`bench/highs_rule_sizes.py`: its presolve sizes with one rule
+  off at a time, sizes only):
+
+  | Instance | HiGHS columns | aggregator off | sparsify off | probing off | doubleton eq. off |
+  |---|---:|---:|---:|---:|---:|
+  | app1-1 | 1,059 | +1,158 | +191 | +127 | |
+  | b1c1s1 | 2,718 | +1,128 | | | |
+  | neos-2657525-crna | 309 | +126 | | | +2 |
+  | neos-4954672-berkel | 885 | +39 | +72 | | +36 |
+
+  neos859080 and fhnw-binpack4-4 move with no single rule off (rules overlap there).
+- **Why C3 misses them.**
+  - On b1c1s1 every candidate fails the implied-free proof (9,054 rejects). HiGHS's
+    aggregator must use another argument there, probably dual implied freeness: a bound that
+    the sign of the column's reduced cost (from row dual bounds) shows is never active.
+  - On app1-1 the candidates are dense columns (more than 1,000 rows). Removing the
+    column-length cap (an experiment) turns those rejects into fill rejects and gains nothing.
+    Counting fill net of x's removed entries (another experiment) changes a few instances
+    either way (neos-2657525-crna 332 → 323, milo 1,938 → 1,946).
+  - Neither change is kept.
+- **Next for C:** dual implied free columns for b1c1s1, and HiGHS's aggregator source for how
+  it handles app1-1's dense columns. Then the MIPLIB A/B, which decides whether presolve size
+  is still the lever for solve time.
+
+**C3b design notes (implemented).** For each bound of x, look for one row of x whose
+activity bounds (without x) prove it, as in `implied_free` but with the row chosen per bound.
+Then substitute x out of an equation e as in C3. Proving and substituting in one step keeps
+this sound. Once x is substituted, it is in no row, so no later proof can rest on its dropped
+bounds. Each dropped bound rests only on bounds that are still explicit, or on those of
+columns substituted later, so the chain of proofs has no cycle (C1 and C3 rely on the same
+argument). The circular case, x's bound proved through y's and y's through x's with both
+dropped, arises only if proven implied bounds are stored and reused, which HiGHS does and
+must guard against. Rule: never store an implied bound; prove it right before the
+substitution, as C3 does. Measure on app1-1, b1c1s1 and crna first.
 ### D. Clique table in propagation and probing (1.5 days)
 
 The conflict graph (`src/mip/cuts.cpp`) now feeds only the clique separator. The research found
