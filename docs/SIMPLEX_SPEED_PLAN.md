@@ -248,12 +248,25 @@ independent from the start (the triangular crash of part 2) is the next lever.
   one to a bound by a ratio test, pivoting when a basic variable blocks. Then the primal simplex
   runs from a nearly feasible vertex.
 
+**Part 2 done (89f4f07).**
+- The push runs on a frozen residual and takes 371 s on the large LP.
+- The dual simplex starts with 5,024 infeasible rows instead of about 212k, and dual phase 2
+  finishes after 79,786 iterations.
+- The cleanup of 190,872 cost shifts does not finish within the hour.
+- A dual push (IPX order) would remove the shifts, but here it means about 381k pivots (it is not
+  committed).
+- Netlib with barrier plus crossover: 93/93 verified, crossover iterations 3.7x fewer, 6% faster.
+- Details in `docs/results/large_lp.md`.
+
 ## Order
 
-Step 0 is done (results above). Then 2 and 1b (the CHUZR list), then 3, which also gives the
-index lists for the rest of step 1. Step 6 can run alongside, since it touches
-`crossover.cpp`, not the iteration; its first part (repair at PDLP-nearest bounds) is in
-1757a8d. Then 4; step 5 is dropped. Every step: the Netlib and
+Step 0 is done (results above). Steps 2 and 1b are done (1b adaptive since f837aba), and step 6
+parts 1 and 2 (1757a8d, 89f4f07).
+- **Step 3 is now the lever for the hour.** The crossover's iterations are about 25 ms, and
+  d064a57's work counts show that most of FTRAN and BTRAN is scanning, not arithmetic: Lᵀ as
+  dot products over all of L, and every U slot visited.
+- After step 3: the rest of step 1 (index lists through the iteration), then 4. Step 5 is
+  dropped. Every step: the Netlib and
 random-family differential tests, the verifier unchanged, the four presets, a planted bug.
 Gate (from POST_SUBMISSION_PLAN W4): Netlib geomean from 0.37 s to 0.25 s or better with nothing
 lost, and the large-LP crossover finishing within the hour.

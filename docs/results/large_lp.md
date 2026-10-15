@@ -116,8 +116,51 @@ of a large optimal face:
   number, not the list length.
 - More simplex speed alone cannot fix this. A push phase keeps PDLP's values and moves each
   superbasic to a bound by ratio tests, so the basics stay feasible (Megiddo; the IPX
-  crossover). It is in progress. At about 5 ms per FTRAN, 358k pushes would take about
-  30 minutes.
+  crossover). It is now in place: see the next section.
+
+## Crossover with a primal push phase (15 October 2026)
+
+`samaya --lp-method pdlp --gpu --crossover --time-limit 3600 --log-level 2`, build 89f4f07 (the
+push), alone on the laptop. Raw data: `bench/results/hour-push/`.
+
+| Phase | Outcome |
+|---|---|
+| PDLP to 1e-4 on the GPU | about 1 minute |
+| Primal push | 371 s; 37,759 superbasics (scaled tolerance), 35,190 pivots, 0 infeasible blocks |
+| Handoff | 5,024 infeasible rows (max 6,206), 190,872 cost shifts, dual simplex |
+| Dual phase 2 | optimal after 79,786 iterations; on average 6,022 infeasible rows, against 228k without the push |
+| Primal cleanup of the shifts | 62,737 iterations, then the time limit |
+
+- **This is the first crossover on this LP to get through the dual phase.** It still does not
+  finish the hour: removing the cost shifts takes too many primal iterations at about 25 ms
+  each.
+- **A first push stalled.** It recomputed the basics from the nonbasics (B x_B = −N x_N). Through
+  this ill-conditioned basis that turned PDLP's clamped residuals and the small snaps into basic
+  values far outside their bounds. The result was 231,616 pivots, 231,612 of them degenerate,
+  and no superbasic pushed in 1,476 s. The committed version starts from the point itself and
+  keeps its residual frozen until the final basis.
+- **A tighter PDLP tolerance does not help the dual side** (1,200 s runs,
+  `bench/results/pdlp-xtol/`):
+
+  | PDLP tolerance | Infeasible rows at handoff | Cost shifts |
+  |---|---:|---:|
+  | 1e-4 | 5,024 | 190,872 |
+  | 1e-5 | 4,022 | 188,140 |
+  | 1e-6 | 516 | 196,384 |
+
+  At 1e-6, PDLP alone took about 15 minutes.
+- **A dual push (IPX order) is too long here** (not committed).
+  - 381,109 basic variables have a nonzero PDLP reduced cost, 275,449 of them by more than 1e-3
+    relative; at 1e-6 it is still 318,397.
+  - The optimum is degenerate, so a basis must hold many variables at their bounds, and PDLP
+    gives those nonzero reduced costs. Each dual push is a pivot at about 8 ms.
+  - On small models it removes every cost shift (0 against 160 in the differential test), so it
+    may still pay on medium LPs.
+- **Where the iteration time goes** (d064a57, work per solve):
+  - BTRAN computes Lᵀ as dot products over all 641k entries of L, where about 16k matter;
+  - both solves scan all 468k U pivot slots, while the vectors are 2–3% dense.
+
+  Lᵀ in scatter form and hyper-sparse U solves (simplex step 3) are next.
 
 ## Still to run
 
