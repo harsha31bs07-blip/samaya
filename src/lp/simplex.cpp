@@ -1222,6 +1222,18 @@ void Simplex::finish_profile() {
   count_row("L after rebuild", stats_.factor.l_nnz);
   count_row("U after rebuild", stats_.factor.u_nnz);
   count_row("R after rebuild", stats_.factor.r_nnz);
+  const auto& f = stats_.factor;
+  const auto per = [](long long work, long long calls) {
+    return calls > 0 ? static_cast<double>(work) / static_cast<double>(calls) : 0.0;
+  };
+  log_.log(2, "  ftran work per call (%lld calls): L etas %.0f, L entries %.0f, R entries %.0f, "
+              "U slots %.0f, U entries %.0f", f.ftran_calls, per(f.ftran_l_etas, f.ftran_calls),
+           per(f.ftran_l_entries, f.ftran_calls), per(f.ftran_r_entries, f.ftran_calls),
+           per(f.ftran_u_slots, f.ftran_calls), per(f.ftran_u_entries, f.ftran_calls));
+  log_.log(2, "  btran work per call (%lld calls): U slots %.0f, U entries %.0f, R entries %.0f, "
+              "L entries %.0f", f.btran_calls, per(f.btran_u_slots, f.btran_calls),
+           per(f.btran_u_entries, f.btran_calls), per(f.btran_r_entries, f.btran_calls),
+           per(f.btran_l_entries, f.btran_calls));
   log_.log(2, "simplex profile end");
 }
 

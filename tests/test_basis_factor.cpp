@@ -212,6 +212,31 @@ TEST(factor_amortized_rebuild_after_enough_update_work) {
   CHECK_EQ(first_due[2], 0);
 }
 
+TEST(factor_counts_solve_work_only_when_collecting) {
+  std::mt19937 rng(5);
+  const SparseMatrix a = random_matrix(30, 60, 0.1, rng);
+  for (const bool collect : {false, true}) {
+    BasisFactor::Options options;
+    options.collect_stats = collect;
+    BasisFactor f(a, options);
+    const std::vector<Index> basic = random_basis(a, f, rng);
+    std::vector<double> x(30, 0.0);
+    x[3] = 1.0;
+    f.ftran(x);
+    std::vector<double> c(30, 0.0);
+    c[7] = 1.0;
+    f.btran(c);
+    const BasisFactor::Stats& s = f.stats();
+    CHECK_EQ(s.ftran_calls, collect ? 1 : 0);
+    CHECK_EQ(s.btran_calls, collect ? 1 : 0);
+    // Without updates the pivot order has m slots, each visited once per solve.
+    CHECK_EQ(s.ftran_u_slots, collect ? 30 : 0);
+    CHECK_EQ(s.btran_u_slots, collect ? 30 : 0);
+    CHECK_EQ(s.ftran_r_entries, 0);
+    (void)basic;
+  }
+}
+
 TEST(factor_detects_rank_deficiency) {
   // Columns 0 and 1 are identical; column 2 is their negation plus nothing new.
   const SparseMatrix a = SparseMatrix::from_triplets(

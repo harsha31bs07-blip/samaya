@@ -49,6 +49,13 @@ class BasisFactor {
     MeasurementCount old_l_nnz, old_u_nnz, old_r_nnz;  // Immediately before clearing updates.
     double rebuild_seconds = 0.0;
     double max_rebuild_seconds = 0.0;
+    // Solve work, in loop iterations and entries touched per part (deterministic, so it shows
+    // where FTRAN and BTRAN spend their time without timers). L etas and U slots count every
+    // one visited, including the ones skipped for a zero pivot entry.
+    long long ftran_calls = 0, ftran_l_etas = 0, ftran_l_entries = 0, ftran_r_entries = 0;
+    long long ftran_u_slots = 0, ftran_u_entries = 0;
+    long long btran_calls = 0, btran_u_slots = 0, btran_u_entries = 0, btran_r_entries = 0;
+    long long btran_l_entries = 0;
   };
   struct Options {
     double pivot_threshold = 0.1;  // Relative threshold against the column max.
@@ -117,7 +124,7 @@ class BasisFactor {
 
   const SparseMatrix& A_;
   Options options_;
-  Stats stats_;
+  mutable Stats stats_;  // The solves are const but count their work.
   Index m_;
   Index n_;
 

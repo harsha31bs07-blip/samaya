@@ -352,9 +352,11 @@ BasisFactor::RebuildReason BasisFactor::refactor_reason() const {
 void BasisFactor::ftran(std::vector<double>& x, std::vector<double>* spike,
                         MeasurementCount* nonzeros) const {
   assert(valid_);
+  long long l_entries = 0;
   for (std::size_t e = 0; e < l_pivot_row_.size(); ++e) {
     const double xp = x[l_pivot_row_[e]];
     if (xp == 0.0) continue;
+    l_entries += l_start_[e + 1] - l_start_[e];
     for (NnzIndex t = l_start_[e]; t < l_start_[e + 1]; ++t) x[l_index_[t]] -= l_value_[t] * xp;
   }
   for (std::size_t e = 0; e < r_pivot_row_.size(); ++e) {
@@ -366,6 +368,7 @@ void BasisFactor::ftran(std::vector<double>& x, std::vector<double>* spike,
 
   std::vector<double>& y = work_;
   long long nnz = 0;
+  long long u_entries = 0;
   for (std::size_t slot = order_.size(); slot-- > 0;) {
     const Index r = order_[slot];
     if (r < 0) continue;
@@ -377,15 +380,26 @@ void BasisFactor::ftran(std::vector<double>& x, std::vector<double>* spike,
     const double yr = xp / diag_[r];
     y[r] = yr;
     if (nonzeros != nullptr && yr != 0.0) ++nnz;
+    u_entries += static_cast<long long>(ucol_[r].size());
     for (const Entry& e : ucol_[r]) x[prow_[e.first]] -= e.second * yr;
   }
   x.swap(y);
   if (nonzeros != nullptr) nonzeros->add(nnz);
+  if (options_.collect_stats) {
+    ++stats_.ftran_calls;
+    stats_.ftran_l_etas += static_cast<long long>(l_pivot_row_.size());
+    stats_.ftran_l_entries += l_entries;
+    stats_.ftran_r_entries += static_cast<long long>(r_index_.size());
+    stats_.ftran_u_slots += static_cast<long long>(order_.size());
+    stats_.ftran_u_entries += u_entries;
+  }
 }
 
 void BasisFactor::btran(std::vector<double>& c) const {
   assert(valid_);
   std::vector<double>& w = work_;
+  long long u_entries = 0;
+  long long r_entries = 0;
   for (const Index r : order_) {
     if (r < 0) continue;
     const double val = c[r];
@@ -395,12 +409,21 @@ void BasisFactor::btran(std::vector<double>& c) const {
     }
     const double z = val / diag_[r];
     w[prow_[r]] = z;
+    u_entries += static_cast<long long>(urow_[r].size());
     for (const Entry& e : urow_[r]) c[e.first] -= e.second * z;
   }
   for (std::size_t e = r_pivot_row_.size(); e-- > 0;) {
     const double wp = w[r_pivot_row_[e]];
     if (wp == 0.0) continue;
+    r_entries += r_start_[e + 1] - r_start_[e];
     for (NnzIndex t = r_start_[e]; t < r_start_[e + 1]; ++t) w[r_index_[t]] -= r_value_[t] * wp;
+  }
+  if (options_.collect_stats) {
+    ++stats_.btran_calls;
+    stats_.btran_u_slots += static_cast<long long>(order_.size());
+    stats_.btran_u_entries += u_entries;
+    stats_.btran_r_entries += r_entries;
+    stats_.btran_l_entries += static_cast<long long>(l_index_.size());
   }
   for (std::size_t e = l_pivot_row_.size(); e-- > 0;) {
     double sum = 0.0;
